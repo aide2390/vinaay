@@ -8,14 +8,14 @@ import {
   TextInput,
   Alert,
   Modal,
+  RefreshControl,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { ArrowLeft, Plus, Search, Filter, Clock, Dumbbell, Edit, Trash2, Copy, X } from 'lucide-react-native';
 import { useColorScheme, getColors } from '@/hooks/useColorScheme';
 import { router } from 'expo-router';
-import { WorkoutTemplate } from '@/types/workout';
 import { getTemplates, deleteTemplate } from '@/utils/storage';
-import { formatDuration } from '@/utils/workoutUtils';
+import { WorkoutTemplate } from '@/lib/database';
 
 const categories = ['All', 'Strength', 'Cardio', 'Bodyweight', 'HIIT', 'Flexibility', 'Athletic Performance', 'Rehabilitation'];
 
@@ -29,6 +29,7 @@ export default function TemplatesScreen() {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState('All');
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [showCategoryModal, setShowCategoryModal] = useState(false);
   const [newCategory, setNewCategory] = useState('');
   const [customCategories, setCustomCategories] = useState<string[]>([]);
@@ -43,13 +44,21 @@ export default function TemplatesScreen() {
 
   const loadTemplates = async () => {
     try {
+      setLoading(true);
       const loadedTemplates = await getTemplates();
       setTemplates(loadedTemplates);
     } catch (error) {
       console.error('Error loading templates:', error);
+      Alert.alert('Error', 'Failed to load templates');
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleRefresh = async () => {
+    setRefreshing(true);
+    await loadTemplates();
+    setRefreshing(false);
   };
 
   const filterTemplates = () => {
@@ -82,6 +91,7 @@ export default function TemplatesScreen() {
             try {
               await deleteTemplate(template.id);
               await loadTemplates();
+              Alert.alert('Success', 'Template deleted successfully');
             } catch (error) {
               console.error('Error deleting template:', error);
               Alert.alert('Error', 'Failed to delete template');
@@ -117,6 +127,15 @@ export default function TemplatesScreen() {
   };
 
   const allCategories = [...categories, ...customCategories];
+
+  const formatDuration = (minutes: number): string => {
+    if (minutes < 60) {
+      return `${minutes} min`;
+    }
+    const hours = Math.floor(minutes / 60);
+    const remainingMinutes = minutes % 60;
+    return remainingMinutes > 0 ? `${hours}h ${remainingMinutes}m` : `${hours}h`;
+  };
 
   const renderTemplateCard = (template: WorkoutTemplate) => (
     <TouchableOpacity
@@ -158,11 +177,15 @@ export default function TemplatesScreen() {
       <View style={styles.templateMeta}>
         <View style={styles.metaItem}>
           <Dumbbell size={14} color={colors.textSecondary} />
-          <Text style={styles.metaText}>{template.exercises.length} exercises</Text>
+          <Text style={styles.metaText}>
+            {template.exercises?.length || 0} exercises
+          </Text>
         </View>
         <View style={styles.metaItem}>
           <Clock size={14} color={colors.textSecondary} />
-          <Text style={styles.metaText}>{formatDuration(template.duration)}</Text>
+          <Text style={styles.metaText}>
+            {formatDuration(template.estimated_duration_minutes)}
+          </Text>
         </View>
       </View>
 
@@ -173,7 +196,7 @@ export default function TemplatesScreen() {
           </Text>
         </View>
         <Text style={styles.templateDate}>
-          {new Date(template.updatedAt).toLocaleDateString()}
+          {new Date(template.updated_at).toLocaleDateString()}
         </Text>
       </View>
     </TouchableOpacity>
@@ -263,7 +286,13 @@ export default function TemplatesScreen() {
       </View>
 
       {/* Templates List */}
-      <ScrollView style={styles.content} showsVerticalScrollIndicator={false}>
+      <ScrollView 
+        style={styles.content} 
+        showsVerticalScrollIndicator={false}
+        refreshControl={
+          <RefreshControl refreshing={refreshing} onRefresh={handleRefresh} />
+        }
+      >
         {filteredTemplates.length === 0 ? (
           <View style={styles.emptyState}>
             <Dumbbell size={48} color={colors.textTertiary} />
