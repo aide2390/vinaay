@@ -8,6 +8,7 @@ import {
   TextInput,
   Alert,
   Modal,
+  Platform,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { 
@@ -17,15 +18,25 @@ import {
   X,
   Plus,
   Trash2,
-  Copy
+  Copy,
+  Save
 } from 'lucide-react-native';
 import { useColorScheme, getColors } from '@/hooks/useColorScheme';
 import { router, useLocalSearchParams } from 'expo-router';
-import { WorkoutPlan, Client, WorkoutTemplate, DayOfWeek } from '@/types/workout';
-import { savePlan, getPlan, getClients, getTemplates } from '@/utils/storage';
-import { generateId, getWeekDates } from '@/utils/workoutUtils';
+import DateTimePicker from '@react-native-community/datetimepicker';
+import {
+  getTrainerClients,
+  getWorkoutTemplatesForPlans,
+  createWorkoutPlan,
+  updateWorkoutPlan,
+  getWorkoutPlan,
+  createPlanSessions,
+  deletePlanSessions,
+  ClientProfile,
+  WorkoutPlan,
+} from '@/lib/planDatabase';
 
-const daysOfWeek: DayOfWeek[] = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+const daysOfWeek = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
 
 type ScheduleType = 'weekly' | 'monthly' | 'custom';
 
@@ -36,6 +47,13 @@ interface CustomScheduleDay {
   label?: string;
 }
 
+interface WorkoutTemplate {
+  id: string;
+  name: string;
+  category: string;
+  estimated_duration_minutes: number;
+}
+
 export default function CreatePlanScreen() {
   const colorScheme = useColorScheme();
   const colors = getColors(colorScheme);
@@ -43,17 +61,18 @@ export default function CreatePlanScreen() {
   const { edit } = useLocalSearchParams();
 
   const [planName, setPlanName] = useState('');
-  const [selectedClient, setSelectedClient] = useState<Client | null>(null);
-  const [startDate, setStartDate] = useState(new Date().toISOString().split('T')[0]);
+  const [planDescription, setPlanDescription] = useState('');
+  const [selectedClient, setSelectedClient] = useState<ClientProfile | null>(null);
+  const [startDate, setStartDate] = useState(new Date());
   const [endDate, setEndDate] = useState(() => {
     const date = new Date();
     date.setDate(date.getDate() + 28); // 4 weeks default
-    return date.toISOString().split('T')[0];
+    return date;
   });
   
   // Schedule type and data
   const [scheduleType, setScheduleType] = useState<ScheduleType>('weekly');
-  const [weeklySchedule, setWeeklySchedule] = useState<{ [key in DayOfWeek]: string | null }>({
+  const [weeklySchedule, setWeeklySchedule] = useState<{ [key: string]: string | null }>({
     Monday: null,
     Tuesday: null,
     Wednesday: null,
@@ -62,7 +81,7 @@ export default function CreatePlanScreen() {
     Saturday: null,
     Sunday: null,
   });
-  const [monthlySchedule, setMonthlySchedule] = useState<{ [week: number]: { [key in DayOfWeek]: string | null } }>({
+  const [monthlySchedule, setMonthlySchedule] = useState<{ [week: number]: { [key: string]: string | null } }>({
     1: { Monday: null, Tuesday: null, Wednesday: null, Thursday: null, Friday: null, Saturday: null, Sunday: null },
     2: { Monday: null, Tuesday: null, Wednesday: null, Thursday: null, Friday: null, Saturday: null, Sunday: null },
     3: { Monday: null, Tuesday: null, Wednesday: null, Thursday: null, Friday: null, Saturday: null, Sunday: null },
@@ -70,12 +89,14 @@ export default function CreatePlanScreen() {
   });
   const [customSchedule, setCustomSchedule] = useState<CustomScheduleDay[]>([]);
 
-  const [clients, setClients] = useState<Client[]>([]);
+  const [clients, setClients] = useState<ClientProfile[]>([]);
   const [templates, setTemplates] = useState<WorkoutTemplate[]>([]);
   const [showClientPicker, setShowClientPicker] = useState(false);
   const [showTemplatePicker, setShowTemplatePicker] = useState(false);
   const [showScheduleTypePicker, setShowScheduleTypePicker] = useState(false);
-  const [selectedDay, setSelectedDay] = useState<DayOfWeek | null>(null);
+  const [showStartDatePicker, setShowStartDatePicker] = useState(false);
+  const [showEndDatePicker, setShowEndDatePicker] = useState(false);
+  const [selectedDay, setSelectedDay] = useState<string | null>(null);
   const [selectedWeek, setSelectedWeek] = useState<number | null>(null);
   const [selectedCustomDay, setSelectedCustomDay] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -92,27 +113,38 @@ export default function CreatePlanScreen() {
   const loadData = async () => {
     try {
       const [loadedClients, loadedTemplates] = await Promise.all([
-        getClients(),
-        getTemplates()
+        getTrainerClients(),
+        getWorkoutTemplatesForPlans()
       ]);
       setClients(loadedClients);
       setTemplates(loadedTemplates);
     } catch (error) {
       console.error('Error loading data:', error);
+      Alert.alert('Error', 'Failed to load data');
     }
   };
 
   const loadPlan = async () => {
     try {
       const planId = edit as string;
-      const plan = await getPlan(planId);
+      const plan = await getWorkoutPlan(planId);
       if (plan) {
         setPlanName(plan.name);
-        setStartDate(plan.startDate);
-        setEndDate(plan.endDate);
-        setWeeklySchedule(plan.schedule as any);
+        setPlanDescription(plan.description || '');
+        setStartDate(new Date(plan.start_date));
+        setEndDate(new Date(plan.end_date));
+        setScheduleType(plan.schedule_type);
         
-        const client = clients.find(c => c.id === plan.clientId);
+        // Load schedule data based on type
+        if (plan.schedule_type === 'weekly') {
+          setWeeklySchedule(plan.schedule_data || {});
+        } else if (plan.schedule_type === 'monthly') {
+          setMonthlySchedule(plan.schedule_data || {});
+        } else if (plan.schedule_type === 'custom') {
+          setCustomSchedule(plan.schedule_data || []);
+        }
+        
+        const client = clients.find(c => c.id === plan.client_id);
         if (client) {
           setSelectedClient(client);
         }
@@ -123,7 +155,11 @@ export default function CreatePlanScreen() {
     }
   };
 
-  const handleDayPress = (day: DayOfWeek, week?: number) => {
+  const generateId = (): string => {
+    return Date.now().toString(36) + Math.random().toString(36).substr(2);
+  };
+
+  const handleDayPress = (day: string, week?: number) => {
     setSelectedDay(day);
     setSelectedWeek(week || null);
     setShowTemplatePicker(true);
@@ -224,7 +260,7 @@ export default function CreatePlanScreen() {
       return;
     }
 
-    if (new Date(endDate) <= new Date(startDate)) {
+    if (endDate <= startDate) {
       Alert.alert('Error', 'End date must be after start date');
       return;
     }
@@ -245,24 +281,32 @@ export default function CreatePlanScreen() {
 
     setLoading(true);
     try {
-      const plan: WorkoutPlan = {
-        id: isEditing ? (edit as string) : generateId(),
-        clientId: selectedClient.id,
-        trainerId: 'current-user', // TODO: Get from user context
+      const planData = {
+        client_id: selectedClient.id,
         name: planName.trim(),
-        startDate,
-        endDate,
-        schedule: finalSchedule,
-        createdAt: isEditing ? new Date().toISOString() : new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
+        description: planDescription.trim() || undefined,
+        start_date: startDate.toISOString().split('T')[0],
+        end_date: endDate.toISOString().split('T')[0],
+        schedule_type: scheduleType,
+        schedule_data: finalSchedule,
       };
 
-      await savePlan(plan);
-      Alert.alert(
-        'Success',
-        `Plan ${isEditing ? 'updated' : 'created'} successfully!`,
-        [{ text: 'OK', onPress: () => router.back() }]
-      );
+      let savedPlan;
+      if (isEditing) {
+        savedPlan = await updateWorkoutPlan(edit as string, planData);
+      } else {
+        savedPlan = await createWorkoutPlan(planData);
+      }
+
+      if (savedPlan) {
+        Alert.alert(
+          'Success',
+          `Plan ${isEditing ? 'updated' : 'created'} successfully!`,
+          [{ text: 'OK', onPress: () => router.back() }]
+        );
+      } else {
+        Alert.alert('Error', 'Failed to save plan');
+      }
     } catch (error) {
       console.error('Error saving plan:', error);
       Alert.alert('Error', 'Failed to save plan');
@@ -271,8 +315,22 @@ export default function CreatePlanScreen() {
     }
   };
 
+  const onStartDateChange = (event: any, selectedDate?: Date) => {
+    setShowStartDatePicker(false);
+    if (selectedDate) {
+      setStartDate(selectedDate);
+    }
+  };
+
+  const onEndDateChange = (event: any, selectedDate?: Date) => {
+    setShowEndDatePicker(false);
+    if (selectedDate) {
+      setEndDate(selectedDate);
+    }
+  };
+
   const renderWeeklySchedule = () => {
-    const renderDayCard = (day: DayOfWeek) => {
+    const renderDayCard = (day: string) => {
       const templateId = weeklySchedule[day];
       const hasWorkout = templateId !== null;
       
@@ -444,6 +502,7 @@ export default function CreatePlanScreen() {
           onPress={handleSavePlan}
           disabled={loading}
         >
+          <Save size={16} color="#FFFFFF" />
           <Text style={styles.saveButtonText}>
             {loading ? 'Saving...' : 'Save'}
           </Text>
@@ -467,6 +526,19 @@ export default function CreatePlanScreen() {
           </View>
 
           <View style={styles.formField}>
+            <Text style={styles.fieldLabel}>Description</Text>
+            <TextInput
+              style={[styles.textInput, styles.textArea]}
+              value={planDescription}
+              onChangeText={setPlanDescription}
+              placeholder="Describe this workout plan..."
+              placeholderTextColor={colors.textTertiary}
+              multiline
+              numberOfLines={3}
+            />
+          </View>
+
+          <View style={styles.formField}>
             <Text style={styles.fieldLabel}>Client *</Text>
             <TouchableOpacity
               style={styles.picker}
@@ -476,7 +548,7 @@ export default function CreatePlanScreen() {
                 styles.pickerText,
                 !selectedClient && styles.placeholderText
               ]}>
-                {selectedClient?.name || 'Select a client'}
+                {selectedClient?.full_name || 'Select a client'}
               </Text>
               <ChevronDown size={20} color={colors.textSecondary} />
             </TouchableOpacity>
@@ -485,24 +557,28 @@ export default function CreatePlanScreen() {
           <View style={styles.formRow}>
             <View style={styles.formFieldHalf}>
               <Text style={styles.fieldLabel}>Start Date</Text>
-              <TextInput
-                style={styles.textInput}
-                value={startDate}
-                onChangeText={setStartDate}
-                placeholder="YYYY-MM-DD"
-                placeholderTextColor={colors.textTertiary}
-              />
+              <TouchableOpacity
+                style={styles.picker}
+                onPress={() => setShowStartDatePicker(true)}
+              >
+                <Calendar size={16} color={colors.textSecondary} />
+                <Text style={styles.pickerText}>
+                  {startDate.toLocaleDateString()}
+                </Text>
+              </TouchableOpacity>
             </View>
 
             <View style={styles.formFieldHalf}>
               <Text style={styles.fieldLabel}>End Date</Text>
-              <TextInput
-                style={styles.textInput}
-                value={endDate}
-                onChangeText={setEndDate}
-                placeholder="YYYY-MM-DD"
-                placeholderTextColor={colors.textTertiary}
-              />
+              <TouchableOpacity
+                style={styles.picker}
+                onPress={() => setShowEndDatePicker(true)}
+              >
+                <Calendar size={16} color={colors.textSecondary} />
+                <Text style={styles.pickerText}>
+                  {endDate.toLocaleDateString()}
+                </Text>
+              </TouchableOpacity>
             </View>
           </View>
         </View>
@@ -548,6 +624,25 @@ export default function CreatePlanScreen() {
         <View style={{ height: 100 }} />
       </ScrollView>
 
+      {/* Date Pickers */}
+      {showStartDatePicker && (
+        <DateTimePicker
+          value={startDate}
+          mode="date"
+          display={Platform.OS === 'ios' ? 'spinner' : 'default'}
+          onChange={onStartDateChange}
+        />
+      )}
+
+      {showEndDatePicker && (
+        <DateTimePicker
+          value={endDate}
+          mode="date"
+          display={Platform.OS === 'ios' ? 'spinner' : 'default'}
+          onChange={onEndDateChange}
+        />
+      )}
+
       {/* Client Picker Modal */}
       <Modal
         visible={showClientPicker}
@@ -555,9 +650,13 @@ export default function CreatePlanScreen() {
         presentationStyle="pageSheet"
         onRequestClose={() => setShowClientPicker(false)}
       >
-        <View style={styles.modalContainer}>
-          <View style={styles.modalHandle} />
-          <Text style={styles.modalTitle}>Select Client</Text>
+        <SafeAreaView style={styles.modalContainer}>
+          <View style={styles.modalHeader}>
+            <Text style={styles.modalTitle}>Select Client</Text>
+            <TouchableOpacity onPress={() => setShowClientPicker(false)}>
+              <X size={24} color={colors.text} />
+            </TouchableOpacity>
+          </View>
           
           <ScrollView style={styles.clientList}>
             {clients.map((client) => (
@@ -572,9 +671,8 @@ export default function CreatePlanScreen() {
                   setShowClientPicker(false);
                 }}
               >
-                <Text style={styles.clientAvatar}>{client.avatar}</Text>
                 <View style={styles.clientInfo}>
-                  <Text style={styles.clientName}>{client.name}</Text>
+                  <Text style={styles.clientName}>{client.full_name}</Text>
                   <Text style={styles.clientEmail}>{client.email}</Text>
                 </View>
                 {selectedClient?.id === client.id && (
@@ -585,7 +683,7 @@ export default function CreatePlanScreen() {
               </TouchableOpacity>
             ))}
           </ScrollView>
-        </View>
+        </SafeAreaView>
       </Modal>
 
       {/* Schedule Type Picker Modal */}
@@ -595,9 +693,13 @@ export default function CreatePlanScreen() {
         presentationStyle="pageSheet"
         onRequestClose={() => setShowScheduleTypePicker(false)}
       >
-        <View style={styles.modalContainer}>
-          <View style={styles.modalHandle} />
-          <Text style={styles.modalTitle}>Select Schedule Type</Text>
+        <SafeAreaView style={styles.modalContainer}>
+          <View style={styles.modalHeader}>
+            <Text style={styles.modalTitle}>Select Schedule Type</Text>
+            <TouchableOpacity onPress={() => setShowScheduleTypePicker(false)}>
+              <X size={24} color={colors.text} />
+            </TouchableOpacity>
+          </View>
           
           <View style={styles.scheduleTypeList}>
             {(['weekly', 'monthly', 'custom'] as ScheduleType[]).map((type) => (
@@ -631,7 +733,7 @@ export default function CreatePlanScreen() {
               </TouchableOpacity>
             ))}
           </View>
-        </View>
+        </SafeAreaView>
       </Modal>
 
       {/* Template Picker Modal */}
@@ -641,11 +743,13 @@ export default function CreatePlanScreen() {
         presentationStyle="pageSheet"
         onRequestClose={() => setShowTemplatePicker(false)}
       >
-        <View style={styles.modalContainer}>
-          <View style={styles.modalHandle} />
-          <Text style={styles.modalTitle}>
-            Select Template
-          </Text>
+        <SafeAreaView style={styles.modalContainer}>
+          <View style={styles.modalHeader}>
+            <Text style={styles.modalTitle}>Select Template</Text>
+            <TouchableOpacity onPress={() => setShowTemplatePicker(false)}>
+              <X size={24} color={colors.text} />
+            </TouchableOpacity>
+          </View>
           
           <ScrollView style={styles.templateList}>
             {/* Rest Day Option */}
@@ -669,14 +773,13 @@ export default function CreatePlanScreen() {
                 <View style={styles.templateInfo}>
                   <Text style={styles.templateOptionName}>{template.name}</Text>
                   <Text style={styles.templateOptionDescription}>
-                    {template.exercises.length} exercises • {template.duration} min
+                    {template.estimated_duration_minutes} min • {template.category}
                   </Text>
-                  <Text style={styles.templateOptionCategory}>{template.category}</Text>
                 </View>
               </TouchableOpacity>
             ))}
           </ScrollView>
-        </View>
+        </SafeAreaView>
       </Modal>
     </SafeAreaView>
   );
@@ -707,10 +810,13 @@ const createStyles = (colors: any) => StyleSheet.create({
     textAlign: 'center',
   },
   saveButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
     backgroundColor: colors.primary,
     borderRadius: 20,
     paddingHorizontal: 16,
     paddingVertical: 8,
+    gap: 4,
   },
   saveButtonDisabled: {
     opacity: 0.6,
@@ -768,6 +874,10 @@ const createStyles = (colors: any) => StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 12,
   },
+  textArea: {
+    minHeight: 80,
+    textAlignVertical: 'top',
+  },
   picker: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -778,11 +888,13 @@ const createStyles = (colors: any) => StyleSheet.create({
     borderRadius: 8,
     paddingHorizontal: 12,
     paddingVertical: 12,
+    gap: 8,
   },
   pickerText: {
     fontFamily: 'Inter-Regular',
     fontSize: 16,
     color: colors.text,
+    flex: 1,
   },
   placeholderText: {
     color: colors.textTertiary,
@@ -1023,44 +1135,38 @@ const createStyles = (colors: any) => StyleSheet.create({
   // Modal Styles
   modalContainer: {
     flex: 1,
-    backgroundColor: colors.surface,
-    paddingTop: 20,
-    paddingHorizontal: 20,
+    backgroundColor: colors.background,
   },
-  modalHandle: {
-    width: 40,
-    height: 4,
-    backgroundColor: colors.border,
-    borderRadius: 2,
-    alignSelf: 'center',
-    marginBottom: 20,
+  modalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
   },
   modalTitle: {
     fontFamily: 'Inter-Bold',
     fontSize: 20,
     color: colors.text,
-    textAlign: 'center',
-    marginBottom: 32,
   },
   clientList: {
     flex: 1,
+    paddingHorizontal: 20,
   },
   clientOption: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: colors.surfaceSecondary,
+    backgroundColor: colors.surface,
     borderRadius: 12,
     padding: 16,
-    marginBottom: 8,
+    marginVertical: 4,
   },
   selectedClientOption: {
     backgroundColor: `${colors.primary}20`,
     borderWidth: 1,
     borderColor: colors.primary,
-  },
-  clientAvatar: {
-    fontSize: 24,
-    marginRight: 16,
   },
   clientInfo: {
     flex: 1,
@@ -1091,15 +1197,16 @@ const createStyles = (colors: any) => StyleSheet.create({
   },
   scheduleTypeList: {
     flex: 1,
+    paddingHorizontal: 20,
   },
   scheduleTypeOption: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    backgroundColor: colors.surfaceSecondary,
+    backgroundColor: colors.surface,
     borderRadius: 12,
     padding: 20,
-    marginBottom: 12,
+    marginVertical: 6,
   },
   selectedScheduleTypeOption: {
     backgroundColor: `${colors.primary}20`,
@@ -1126,12 +1233,13 @@ const createStyles = (colors: any) => StyleSheet.create({
   },
   templateList: {
     flex: 1,
+    paddingHorizontal: 20,
   },
   templateOption: {
-    backgroundColor: colors.surfaceSecondary,
+    backgroundColor: colors.surface,
     borderRadius: 12,
     padding: 16,
-    marginBottom: 8,
+    marginVertical: 4,
   },
   templateInfo: {
     flex: 1,
@@ -1146,11 +1254,5 @@ const createStyles = (colors: any) => StyleSheet.create({
     fontFamily: 'Inter-Regular',
     fontSize: 14,
     color: colors.textSecondary,
-    marginBottom: 4,
-  },
-  templateOptionCategory: {
-    fontFamily: 'Inter-Medium',
-    fontSize: 12,
-    color: colors.primary,
   },
 });
