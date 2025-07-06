@@ -1,12 +1,21 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { WorkoutTemplate, WorkoutPlan, WorkoutSession, Client, Exercise } from '../types/workout';
+import { 
+  getExercises as dbGetExercises, 
+  createExercise as dbCreateExercise,
+  getWorkoutTemplates as dbGetWorkoutTemplates,
+  getWorkoutTemplate as dbGetWorkoutTemplate,
+  createWorkoutTemplate as dbCreateWorkoutTemplate,
+  updateWorkoutTemplate as dbUpdateWorkoutTemplate,
+  deleteWorkoutTemplate as dbDeleteWorkoutTemplate,
+  Exercise as DbExercise,
+  WorkoutTemplate as DbWorkoutTemplate
+} from '../lib/database';
 
 const STORAGE_KEYS = {
-  TEMPLATES: '@workout_templates',
   PLANS: '@workout_plans',
   SESSIONS: '@workout_sessions',
   CLIENTS: '@clients',
-  EXERCISES: '@exercises',
   PENDING_SYNC: '@pending_sync',
   USER_ROLE: '@user_role',
   USER_ID: '@user_id',
@@ -41,29 +50,167 @@ export const removeData = async (key: string): Promise<void> => {
   }
 };
 
-// Template functions
-export const saveTemplate = async (template: WorkoutTemplate): Promise<void> => {
-  const templates = await getTemplates();
-  const updatedTemplates = templates.filter(t => t.id !== template.id);
-  updatedTemplates.push(template);
-  await storeData(STORAGE_KEYS.TEMPLATES, updatedTemplates);
-  await addToPendingSync('template', template.id, 'create');
+// Exercise functions - now using Supabase
+export const getExercises = async (): Promise<Exercise[]> => {
+  try {
+    const dbExercises = await dbGetExercises();
+    // Transform database exercises to match our Exercise interface
+    return dbExercises.map(exercise => ({
+      id: exercise.id,
+      name: exercise.name,
+      category: exercise.category,
+      muscleGroups: exercise.muscle_groups,
+      instructions: exercise.instructions,
+      equipment: exercise.equipment,
+    }));
+  } catch (error) {
+    console.error('Error getting exercises:', error);
+    return [];
+  }
 };
 
+export const saveExercise = async (exercise: Omit<Exercise, 'id'>): Promise<Exercise | null> => {
+  try {
+    const dbExercise = await dbCreateExercise({
+      name: exercise.name,
+      category: exercise.category,
+      muscle_groups: exercise.muscleGroups,
+      instructions: exercise.instructions,
+      equipment: exercise.equipment,
+      is_public: false, // Default to private
+    });
+
+    if (!dbExercise) return null;
+
+    // Transform back to our Exercise interface
+    return {
+      id: dbExercise.id,
+      name: dbExercise.name,
+      category: dbExercise.category,
+      muscleGroups: dbExercise.muscle_groups,
+      instructions: dbExercise.instructions,
+      equipment: dbExercise.equipment,
+    };
+  } catch (error) {
+    console.error('Error saving exercise:', error);
+    return null;
+  }
+};
+
+// Template functions - now using Supabase
 export const getTemplates = async (): Promise<WorkoutTemplate[]> => {
-  return await getData<WorkoutTemplate[]>(STORAGE_KEYS.TEMPLATES) || [];
+  try {
+    const dbTemplates = await dbGetWorkoutTemplates();
+    // Transform database templates to match our WorkoutTemplate interface
+    return dbTemplates.map(template => ({
+      id: template.id,
+      name: template.name,
+      description: template.description,
+      category: template.category,
+      duration: template.estimated_duration_minutes,
+      exercises: template.exercises?.map(te => ({
+        id: te.id,
+        exerciseId: te.exercise_id,
+        exercise: te.exercise ? {
+          id: te.exercise.id,
+          name: te.exercise.name,
+          category: te.exercise.category,
+          muscleGroups: te.exercise.muscle_groups,
+          instructions: te.exercise.instructions,
+          equipment: te.exercise.equipment,
+        } : {} as Exercise,
+        sets: te.sets_config || [],
+        order: te.order_index,
+        notes: te.notes,
+      })) || [],
+      createdBy: template.created_by,
+      createdAt: template.created_at,
+      updatedAt: template.updated_at,
+      isPublic: template.is_public,
+    }));
+  } catch (error) {
+    console.error('Error getting templates:', error);
+    return [];
+  }
 };
 
 export const getTemplate = async (id: string): Promise<WorkoutTemplate | null> => {
-  const templates = await getTemplates();
-  return templates.find(t => t.id === id) || null;
+  try {
+    const dbTemplate = await dbGetWorkoutTemplate(id);
+    if (!dbTemplate) return null;
+
+    // Transform database template to match our WorkoutTemplate interface
+    return {
+      id: dbTemplate.id,
+      name: dbTemplate.name,
+      description: dbTemplate.description,
+      category: dbTemplate.category,
+      duration: dbTemplate.estimated_duration_minutes,
+      exercises: dbTemplate.exercises?.map(te => ({
+        id: te.id,
+        exerciseId: te.exercise_id,
+        exercise: te.exercise ? {
+          id: te.exercise.id,
+          name: te.exercise.name,
+          category: te.exercise.category,
+          muscleGroups: te.exercise.muscle_groups,
+          instructions: te.exercise.instructions,
+          equipment: te.exercise.equipment,
+        } : {} as Exercise,
+        sets: te.sets_config || [],
+        order: te.order_index,
+        notes: te.notes,
+      })) || [],
+      createdBy: dbTemplate.created_by,
+      createdAt: dbTemplate.created_at,
+      updatedAt: dbTemplate.updated_at,
+      isPublic: dbTemplate.is_public,
+    };
+  } catch (error) {
+    console.error('Error getting template:', error);
+    return null;
+  }
+};
+
+export const saveTemplate = async (template: WorkoutTemplate): Promise<void> => {
+  try {
+    const templateData = {
+      name: template.name,
+      description: template.description,
+      category: template.category,
+      estimated_duration_minutes: template.duration,
+      is_public: template.isPublic || false,
+      exercises: template.exercises.map(exercise => ({
+        exercise_id: exercise.exerciseId,
+        order_index: exercise.order,
+        sets_config: exercise.sets,
+        notes: exercise.notes,
+      })),
+    };
+
+    if (template.id && template.id !== 'new') {
+      // Update existing template
+      await dbUpdateWorkoutTemplate(template.id, templateData);
+    } else {
+      // Create new template
+      await dbCreateWorkoutTemplate(templateData);
+    }
+
+    await addToPendingSync('template', template.id, 'create');
+  } catch (error) {
+    console.error('Error saving template:', error);
+    throw error;
+  }
 };
 
 export const deleteTemplate = async (id: string): Promise<void> => {
-  const templates = await getTemplates();
-  const updatedTemplates = templates.filter(t => t.id !== id);
-  await storeData(STORAGE_KEYS.TEMPLATES, updatedTemplates);
-  await addToPendingSync('template', id, 'delete');
+  try {
+    await dbDeleteWorkoutTemplate(id);
+    await addToPendingSync('template', id, 'delete');
+  } catch (error) {
+    console.error('Error deleting template:', error);
+    throw error;
+  }
 };
 
 // Plan functions
@@ -130,15 +277,6 @@ export const getClient = async (id: string): Promise<Client | null> => {
   return clients.find(c => c.id === id) || null;
 };
 
-// Exercise functions
-export const getExercises = async (): Promise<Exercise[]> => {
-  return await getData<Exercise[]>(STORAGE_KEYS.EXERCISES) || [];
-};
-
-export const saveExercises = async (exercises: Exercise[]): Promise<void> => {
-  await storeData(STORAGE_KEYS.EXERCISES, exercises);
-};
-
 // Sync functions
 export const addToPendingSync = async (type: string, id: string, action: 'create' | 'update' | 'delete'): Promise<void> => {
   const pendingSync = await getData<any[]>(STORAGE_KEYS.PENDING_SYNC) || [];
@@ -168,86 +306,4 @@ export const removeSyncItem = async (type: string, id: string): Promise<void> =>
   const pendingSync = await getPendingSync();
   const updatedSync = pendingSync.filter(item => !(item.type === type && item.id === id));
   await storeData(STORAGE_KEYS.PENDING_SYNC, updatedSync);
-};
-
-// Initialize default data
-export const initializeDefaultData = async (): Promise<void> => {
-  const exercises = await getExercises();
-  if (exercises.length === 0) {
-    const defaultExercises: Exercise[] = [
-      {
-        id: '1',
-        name: 'Push-ups',
-        category: 'Bodyweight',
-        muscleGroups: ['Chest', 'Shoulders', 'Triceps'],
-        instructions: 'Start in plank position, lower body to ground, push back up',
-        equipment: 'None'
-      },
-      {
-        id: '2',
-        name: 'Squats',
-        category: 'Bodyweight',
-        muscleGroups: ['Quadriceps', 'Glutes', 'Hamstrings'],
-        instructions: 'Stand with feet shoulder-width apart, lower hips back and down',
-        equipment: 'None'
-      },
-      {
-        id: '3',
-        name: 'Bench Press',
-        category: 'Strength',
-        muscleGroups: ['Chest', 'Shoulders', 'Triceps'],
-        instructions: 'Lie on bench, lower bar to chest, press up',
-        equipment: 'Barbell, Bench'
-      },
-      {
-        id: '4',
-        name: 'Deadlift',
-        category: 'Strength',
-        muscleGroups: ['Hamstrings', 'Glutes', 'Back'],
-        instructions: 'Stand with feet hip-width apart, lift bar from ground',
-        equipment: 'Barbell'
-      },
-      {
-        id: '5',
-        name: 'Pull-ups',
-        category: 'Bodyweight',
-        muscleGroups: ['Back', 'Biceps'],
-        instructions: 'Hang from bar, pull body up until chin over bar',
-        equipment: 'Pull-up bar'
-      }
-    ];
-    await saveExercises(defaultExercises);
-  }
-
-  // Initialize sample clients for trainers
-  const clients = await getClients();
-  if (clients.length === 0) {
-    const defaultClients: Client[] = [
-      {
-        id: 'client-1',
-        name: 'Sarah Johnson',
-        email: 'sarah@example.com',
-        avatar: '👩‍💼',
-        joinDate: '2024-01-15',
-        trainerId: 'trainer-1'
-      },
-      {
-        id: 'client-2',
-        name: 'Mike Chen',
-        email: 'mike@example.com',
-        avatar: '👨‍💻',
-        joinDate: '2024-02-01',
-        trainerId: 'trainer-1'
-      },
-      {
-        id: 'client-3',
-        name: 'Emma Wilson',
-        email: 'emma@example.com',
-        avatar: '👩‍🎨',
-        joinDate: '2024-01-20',
-        trainerId: 'trainer-1'
-      }
-    ];
-    await storeData(STORAGE_KEYS.CLIENTS, defaultClients);
-  }
 };

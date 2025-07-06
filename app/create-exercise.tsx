@@ -13,8 +13,7 @@ import { ArrowLeft, Plus, X } from 'lucide-react-native';
 import { useColorScheme, getColors } from '@/hooks/useColorScheme';
 import { router } from 'expo-router';
 import { Exercise } from '@/types/workout';
-import { getExercises, saveExercises } from '@/utils/storage';
-import { generateId } from '@/utils/workoutUtils';
+import { saveExercise } from '@/utils/storage';
 
 const exerciseCategories = [
   'Strength',
@@ -96,10 +95,7 @@ export default function CreateExerciseScreen() {
 
     setLoading(true);
     try {
-      const exercises = await getExercises();
-      
-      const newExercise: Exercise = {
-        id: generateId(),
+      const newExercise: Omit<Exercise, 'id'> = {
         name: exerciseName.trim(),
         category: selectedCategory,
         muscleGroups: selectedMuscleGroups,
@@ -107,14 +103,17 @@ export default function CreateExerciseScreen() {
         equipment: selectedEquipment || undefined,
       };
 
-      const updatedExercises = [...exercises, newExercise];
-      await saveExercises(updatedExercises);
+      const savedExercise = await saveExercise(newExercise);
 
-      Alert.alert(
-        'Success',
-        'Exercise created successfully!',
-        [{ text: 'OK', onPress: () => router.back() }]
-      );
+      if (savedExercise) {
+        Alert.alert(
+          'Success',
+          'Exercise created successfully!',
+          [{ text: 'OK', onPress: () => router.back() }]
+        );
+      } else {
+        Alert.alert('Error', 'Failed to save exercise');
+      }
     } catch (error) {
       console.error('Error saving exercise:', error);
       Alert.alert('Error', 'Failed to save exercise');

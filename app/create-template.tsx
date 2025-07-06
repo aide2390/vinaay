@@ -23,7 +23,6 @@ import { useColorScheme, getColors } from '@/hooks/useColorScheme';
 import { router, useLocalSearchParams } from 'expo-router';
 import { WorkoutTemplate, Exercise, TemplateExercise } from '@/types/workout';
 import { saveTemplate, getTemplate, getExercises } from '@/utils/storage';
-import { generateId } from '@/utils/workoutUtils';
 
 const templateCategories = [
   'Strength',
@@ -90,6 +89,10 @@ export default function CreateTemplateScreen() {
       console.error('Error loading template:', error);
       Alert.alert('Error', 'Failed to load template');
     }
+  };
+
+  const generateId = (): string => {
+    return Date.now().toString(36) + Math.random().toString(36).substr(2);
   };
 
   const handleAddExercise = (exercise: Exercise) => {
