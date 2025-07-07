@@ -9,8 +9,11 @@ import {
   Alert,
   Modal,
   Platform,
+  Dimensions,
+  Animated,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { LinearGradient } from 'expo-linear-gradient';
 import { 
   ArrowLeft, 
   Plus, 
@@ -24,7 +27,17 @@ import {
   Trash2,
   Users,
   Dumbbell,
-  RefreshCw
+  RefreshCw,
+  CheckCircle,
+  AlertCircle,
+  Target,
+  Zap,
+  Star,
+  TrendingUp,
+  Activity,
+  MapPin,
+  Timer,
+  Award
 } from 'lucide-react-native';
 import { useColorScheme, getColors } from '@/hooks/useColorScheme';
 import { router, useLocalSearchParams } from 'expo-router';
@@ -42,6 +55,8 @@ import {
   WorkoutTemplateForPlan,
   WorkoutPlan,
 } from '@/lib/planDatabase';
+
+const { width } = Dimensions.get('window');
 
 type ScheduleType = 'weekly' | 'monthly' | 'custom';
 type DayOfWeek = 'Monday' | 'Tuesday' | 'Wednesday' | 'Thursday' | 'Friday' | 'Saturday' | 'Sunday';
@@ -61,11 +76,42 @@ interface CustomWorkout {
   label: string;
 }
 
+const scheduleTypeOptions = [
+  {
+    value: 'weekly',
+    label: 'Weekly Repeat',
+    description: 'Same pattern every week',
+    icon: '🔄',
+    color: '#3B82F6',
+    gradient: ['#3B82F6', '#1D4ED8']
+  },
+  {
+    value: 'monthly',
+    label: 'Monthly Plan',
+    description: 'Different patterns for each week',
+    icon: '📅',
+    color: '#10B981',
+    gradient: ['#10B981', '#059669']
+  },
+  {
+    value: 'custom',
+    label: 'Custom Schedule',
+    description: 'Specific dates with custom workouts',
+    icon: '⚡',
+    color: '#F59E0B',
+    gradient: ['#F59E0B', '#D97706']
+  }
+];
+
 export default function CreatePlanScreen() {
   const colorScheme = useColorScheme();
   const colors = getColors(colorScheme);
   const styles = createStyles(colors);
   const { edit } = useLocalSearchParams();
+
+  // Animation values
+  const fadeAnim = new Animated.Value(0);
+  const slideAnim = new Animated.Value(50);
 
   // Form state
   const [planName, setPlanName] = useState('');
@@ -125,6 +171,20 @@ export default function CreatePlanScreen() {
 
   useEffect(() => {
     loadInitialData();
+    
+    // Animate in
+    Animated.parallel([
+      Animated.timing(fadeAnim, {
+        toValue: 1,
+        duration: 600,
+        useNativeDriver: true,
+      }),
+      Animated.timing(slideAnim, {
+        toValue: 0,
+        duration: 600,
+        useNativeDriver: true,
+      }),
+    ]).start();
   }, []);
 
   const loadInitialData = async () => {
@@ -132,7 +192,6 @@ export default function CreatePlanScreen() {
       setLoading(true);
       console.log('🔄 Loading initial data...');
       
-      // Load clients and templates in parallel
       const [clientsData, templatesData] = await Promise.all([
         getTrainerClients(),
         getWorkoutTemplatesForPlans(),
@@ -144,7 +203,6 @@ export default function CreatePlanScreen() {
       setClients(clientsData);
       setTemplates(templatesData);
 
-      // If no clients found, show helpful message
       if (clientsData.length === 0) {
         console.log('⚠️ No clients found, showing alert');
         Alert.alert(
@@ -157,7 +215,6 @@ export default function CreatePlanScreen() {
               onPress: async () => {
                 const success = await createSampleClientAssignment();
                 if (success) {
-                  // Reload clients
                   const updatedClients = await getTrainerClients();
                   setClients(updatedClients);
                   Alert.alert('Success', 'Sample client assignment created!');
@@ -170,7 +227,6 @@ export default function CreatePlanScreen() {
         );
       }
 
-      // Load existing plan if editing
       if (isEditing && typeof edit === 'string') {
         await loadExistingPlan(edit);
       }
@@ -193,13 +249,11 @@ export default function CreatePlanScreen() {
         setStartDate(new Date(plan.start_date));
         setEndDate(new Date(plan.end_date));
 
-        // Find and set the client
         const client = clients.find(c => c.id === plan.client_id);
         if (client) {
           setSelectedClient(client);
         }
 
-        // Load schedule data based on type
         if (plan.schedule_data) {
           switch (plan.schedule_type) {
             case 'weekly':
@@ -241,24 +295,22 @@ export default function CreatePlanScreen() {
     }
   };
 
-  const handleSavePlan = async () => {
-    // Validation
+  const validateForm = () => {
     if (!planName.trim()) {
-      Alert.alert('Error', 'Please enter a plan name');
-      return;
+      Alert.alert('Missing Information', 'Please enter a plan name');
+      return false;
     }
 
     if (!selectedClient) {
-      Alert.alert('Error', 'Please select a client');
-      return;
+      Alert.alert('Missing Information', 'Please select a client');
+      return false;
     }
 
     if (startDate >= endDate) {
-      Alert.alert('Error', 'End date must be after start date');
-      return;
+      Alert.alert('Invalid Date Range', 'End date must be after start date');
+      return false;
     }
 
-    // Validate schedule has at least one workout
     let hasWorkouts = false;
     switch (scheduleType) {
       case 'weekly':
@@ -275,15 +327,21 @@ export default function CreatePlanScreen() {
     }
 
     if (!hasWorkouts) {
-      Alert.alert('Error', 'Please add at least one workout to the schedule');
-      return;
+      Alert.alert('Missing Workouts', 'Please add at least one workout to the schedule');
+      return false;
     }
+
+    return true;
+  };
+
+  const handleSavePlan = async () => {
+    if (!validateForm()) return;
 
     try {
       setSaving(true);
 
       const planData = {
-        client_id: selectedClient.id,
+        client_id: selectedClient!.id,
         name: planName.trim(),
         description: planDescription.trim() || undefined,
         start_date: startDate.toISOString().split('T')[0],
@@ -301,11 +359,10 @@ export default function CreatePlanScreen() {
       }
 
       if (savedPlan) {
-        // Generate plan sessions
         await generatePlanSessions(savedPlan);
 
         Alert.alert(
-          'Success',
+          'Success! 🎉',
           `Plan ${isEditing ? 'updated' : 'created'} successfully!`,
           [{ text: 'OK', onPress: () => router.back() }]
         );
@@ -335,7 +392,6 @@ export default function CreatePlanScreen() {
 
   const generatePlanSessions = async (plan: WorkoutPlan) => {
     try {
-      // Delete existing sessions if updating
       if (isEditing) {
         await deletePlanSessions(plan.id);
       }
@@ -504,26 +560,149 @@ export default function CreatePlanScreen() {
     return template ? template.name : 'Unknown Template';
   };
 
+  const getTemplateCategory = (templateId: string | null): string => {
+    if (!templateId) return '';
+    const template = templates.find(t => t.id === templateId);
+    return template ? template.category : '';
+  };
+
+  const getTemplateDuration = (templateId: string | null): number => {
+    if (!templateId) return 0;
+    const template = templates.find(t => t.id === templateId);
+    return template ? template.estimated_duration_minutes : 0;
+  };
+
+  const getScheduleStats = () => {
+    let totalWorkouts = 0;
+    let totalDuration = 0;
+
+    switch (scheduleType) {
+      case 'weekly':
+        Object.values(weeklySchedule).forEach(templateId => {
+          if (templateId) {
+            totalWorkouts++;
+            totalDuration += getTemplateDuration(templateId);
+          }
+        });
+        break;
+      case 'monthly':
+        Object.values(monthlySchedule).forEach(week => {
+          Object.values(week).forEach(templateId => {
+            if (templateId) {
+              totalWorkouts++;
+              totalDuration += getTemplateDuration(templateId);
+            }
+          });
+        });
+        totalWorkouts = Math.ceil(totalWorkouts / 4); // Average per week
+        totalDuration = Math.ceil(totalDuration / 4);
+        break;
+      case 'custom':
+        customWorkouts.forEach(workout => {
+          if (workout.templateId) {
+            totalWorkouts++;
+            totalDuration += getTemplateDuration(workout.templateId);
+          }
+        });
+        break;
+    }
+
+    return { totalWorkouts, totalDuration };
+  };
+
+  const renderProgressHeader = () => {
+    const stats = getScheduleStats();
+    const progress = (planName && selectedClient && stats.totalWorkouts > 0) ? 100 : 
+                    (planName && selectedClient) ? 75 :
+                    planName ? 50 : 25;
+
+    return (
+      <View style={styles.progressHeader}>
+        <LinearGradient
+          colors={colorScheme === 'dark' ? ['#1E293B', '#334155'] : ['#F8FAFC', '#E2E8F0']}
+          style={styles.progressCard}
+        >
+          <View style={styles.progressInfo}>
+            <Text style={styles.progressTitle}>Plan Creation Progress</Text>
+            <Text style={styles.progressSubtitle}>{progress}% Complete</Text>
+          </View>
+          <View style={styles.progressBarContainer}>
+            <View style={styles.progressBarBackground}>
+              <Animated.View 
+                style={[
+                  styles.progressBarFill,
+                  { width: `${progress}%` }
+                ]}
+              />
+            </View>
+          </View>
+          {stats.totalWorkouts > 0 && (
+            <View style={styles.statsRow}>
+              <View style={styles.statItem}>
+                <Activity size={16} color={colors.primary} />
+                <Text style={styles.statText}>{stats.totalWorkouts} workouts/week</Text>
+              </View>
+              <View style={styles.statItem}>
+                <Timer size={16} color={colors.success} />
+                <Text style={styles.statText}>{stats.totalDuration} min/week</Text>
+              </View>
+            </View>
+          )}
+        </LinearGradient>
+      </View>
+    );
+  };
+
   const renderWeeklySchedule = () => {
     const days: DayOfWeek[] = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
 
     return (
       <View style={styles.scheduleContainer}>
-        <Text style={styles.scheduleTitle}>Weekly Schedule</Text>
-        {days.map(day => (
-          <View key={day} style={styles.dayRow}>
-            <Text style={styles.dayLabel}>{day}</Text>
-            <TouchableOpacity
-              style={styles.templateButton}
-              onPress={() => openTemplatePicker({ type: 'weekly', day })}
-            >
-              <Text style={styles.templateButtonText}>
-                {getTemplateName(weeklySchedule[day])}
-              </Text>
-              <ChevronDown size={16} color={colors.textSecondary} />
-            </TouchableOpacity>
+        <View style={styles.scheduleHeader}>
+          <View style={styles.scheduleHeaderLeft}>
+            <Text style={styles.scheduleTitle}>Weekly Schedule</Text>
+            <Text style={styles.scheduleSubtitle}>Set your weekly workout pattern</Text>
           </View>
-        ))}
+          <View style={styles.scheduleIcon}>
+            <Text style={styles.scheduleEmoji}>🔄</Text>
+          </View>
+        </View>
+        
+        <View style={styles.daysGrid}>
+          {days.map(day => {
+            const templateId = weeklySchedule[day];
+            const hasWorkout = templateId !== null;
+            
+            return (
+              <TouchableOpacity
+                key={day}
+                style={[
+                  styles.dayCard,
+                  hasWorkout && styles.dayCardActive
+                ]}
+                onPress={() => openTemplatePicker({ type: 'weekly', day })}
+              >
+                <Text style={styles.dayName}>{day.slice(0, 3)}</Text>
+                {hasWorkout ? (
+                  <View style={styles.workoutInfo}>
+                    <Dumbbell size={16} color={colors.primary} />
+                    <Text style={styles.workoutName} numberOfLines={2}>
+                      {getTemplateName(templateId)}
+                    </Text>
+                    <Text style={styles.workoutDuration}>
+                      {getTemplateDuration(templateId)}min
+                    </Text>
+                  </View>
+                ) : (
+                  <View style={styles.restDay}>
+                    <Plus size={20} color={colors.textTertiary} />
+                    <Text style={styles.restDayText}>Add Workout</Text>
+                  </View>
+                )}
+              </TouchableOpacity>
+            );
+          })}
+        </View>
       </View>
     );
   };
@@ -533,7 +712,16 @@ export default function CreatePlanScreen() {
 
     return (
       <View style={styles.scheduleContainer}>
-        <Text style={styles.scheduleTitle}>Monthly Schedule</Text>
+        <View style={styles.scheduleHeader}>
+          <View style={styles.scheduleHeaderLeft}>
+            <Text style={styles.scheduleTitle}>Monthly Schedule</Text>
+            <Text style={styles.scheduleSubtitle}>Different patterns for each week</Text>
+          </View>
+          <View style={styles.scheduleIcon}>
+            <Text style={styles.scheduleEmoji}>📅</Text>
+          </View>
+        </View>
+
         {[1, 2, 3, 4].map(week => (
           <View key={week} style={styles.weekContainer}>
             <View style={styles.weekHeader}>
@@ -542,24 +730,44 @@ export default function CreatePlanScreen() {
                 style={styles.copyButton}
                 onPress={() => copyWeekToAll(week)}
               >
-                <Copy size={16} color={colors.primary} />
+                <Copy size={14} color={colors.primary} />
                 <Text style={styles.copyButtonText}>Copy to All</Text>
               </TouchableOpacity>
             </View>
-            {days.map(day => (
-              <View key={`${week}-${day}`} style={styles.dayRow}>
-                <Text style={styles.dayLabel}>{day}</Text>
-                <TouchableOpacity
-                  style={styles.templateButton}
-                  onPress={() => openTemplatePicker({ type: 'monthly', day, week })}
-                >
-                  <Text style={styles.templateButtonText}>
-                    {getTemplateName(monthlySchedule[week][day])}
-                  </Text>
-                  <ChevronDown size={16} color={colors.textSecondary} />
-                </TouchableOpacity>
-              </View>
-            ))}
+            
+            <View style={styles.weekDaysGrid}>
+              {days.map(day => {
+                const templateId = monthlySchedule[week][day];
+                const hasWorkout = templateId !== null;
+                
+                return (
+                  <TouchableOpacity
+                    key={`${week}-${day}`}
+                    style={[
+                      styles.monthlyDayCard,
+                      hasWorkout && styles.monthlyDayCardActive
+                    ]}
+                    onPress={() => openTemplatePicker({ type: 'monthly', day, week })}
+                  >
+                    <Text style={styles.monthlyDayName}>{day.slice(0, 3)}</Text>
+                    {hasWorkout ? (
+                      <View style={styles.monthlyWorkoutInfo}>
+                        <Text style={styles.monthlyWorkoutName} numberOfLines={1}>
+                          {getTemplateName(templateId)}
+                        </Text>
+                        <Text style={styles.monthlyWorkoutDuration}>
+                          {getTemplateDuration(templateId)}min
+                        </Text>
+                      </View>
+                    ) : (
+                      <View style={styles.monthlyRestDay}>
+                        <Plus size={16} color={colors.textTertiary} />
+                      </View>
+                    )}
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
           </View>
         ))}
       </View>
@@ -569,43 +777,71 @@ export default function CreatePlanScreen() {
   const renderCustomSchedule = () => {
     return (
       <View style={styles.scheduleContainer}>
-        <View style={styles.customHeader}>
-          <Text style={styles.scheduleTitle}>Custom Schedule</Text>
-          <TouchableOpacity style={styles.addButton} onPress={addCustomWorkout}>
-            <Plus size={16} color={colors.primary} />
-            <Text style={styles.addButtonText}>Add Workout</Text>
-          </TouchableOpacity>
+        <View style={styles.scheduleHeader}>
+          <View style={styles.scheduleHeaderLeft}>
+            <Text style={styles.scheduleTitle}>Custom Schedule</Text>
+            <Text style={styles.scheduleSubtitle}>Add workouts on specific dates</Text>
+          </View>
+          <View style={styles.scheduleIcon}>
+            <Text style={styles.scheduleEmoji}>⚡</Text>
+          </View>
         </View>
+
+        <TouchableOpacity style={styles.addCustomButton} onPress={addCustomWorkout}>
+          <LinearGradient
+            colors={['#3B82F6', '#1D4ED8']}
+            style={styles.addCustomGradient}
+          >
+            <Plus size={20} color="#FFFFFF" />
+            <Text style={styles.addCustomText}>Add Custom Workout</Text>
+          </LinearGradient>
+        </TouchableOpacity>
 
         {customWorkouts.length === 0 ? (
           <View style={styles.emptyCustom}>
-            <Text style={styles.emptyCustomText}>No custom workouts added yet</Text>
+            <Calendar size={48} color={colors.textTertiary} />
+            <Text style={styles.emptyCustomTitle}>No custom workouts yet</Text>
+            <Text style={styles.emptyCustomText}>
+              Add specific workout dates to create your custom schedule
+            </Text>
           </View>
         ) : (
-          customWorkouts.map(workout => (
-            <View key={workout.id} style={styles.customWorkoutRow}>
-              <View style={styles.customWorkoutInfo}>
-                <Text style={styles.customWorkoutDate}>
-                  {new Date(workout.date).toLocaleDateString()}
-                </Text>
+          <View style={styles.customWorkoutsList}>
+            {customWorkouts.map(workout => (
+              <View key={workout.id} style={styles.customWorkoutCard}>
+                <View style={styles.customWorkoutLeft}>
+                  <View style={styles.customDateContainer}>
+                    <Text style={styles.customWorkoutDate}>
+                      {new Date(workout.date).toLocaleDateString('en-US', { 
+                        month: 'short', 
+                        day: 'numeric' 
+                      })}
+                    </Text>
+                    <Text style={styles.customWorkoutDay}>
+                      {new Date(workout.date).toLocaleDateString('en-US', { 
+                        weekday: 'short' 
+                      })}
+                    </Text>
+                  </View>
+                  <TouchableOpacity
+                    style={styles.customTemplateButton}
+                    onPress={() => openTemplatePicker({ type: 'custom', customId: workout.id })}
+                  >
+                    <Text style={styles.customTemplateName}>
+                      {getTemplateName(workout.templateId)}
+                    </Text>
+                    <ChevronDown size={16} color={colors.textSecondary} />
+                  </TouchableOpacity>
+                </View>
                 <TouchableOpacity
-                  style={styles.templateButton}
-                  onPress={() => openTemplatePicker({ type: 'custom', customId: workout.id })}
+                  style={styles.removeCustomButton}
+                  onPress={() => removeCustomWorkout(workout.id)}
                 >
-                  <Text style={styles.templateButtonText}>
-                    {getTemplateName(workout.templateId)}
-                  </Text>
-                  <ChevronDown size={16} color={colors.textSecondary} />
+                  <Trash2 size={16} color={colors.error} />
                 </TouchableOpacity>
               </View>
-              <TouchableOpacity
-                style={styles.removeButton}
-                onPress={() => removeCustomWorkout(workout.id)}
-              >
-                <Trash2 size={16} color={colors.error} />
-              </TouchableOpacity>
-            </View>
-          ))
+            ))}
+          </View>
         )}
       </View>
     );
@@ -615,7 +851,14 @@ export default function CreatePlanScreen() {
     return (
       <SafeAreaView style={styles.container}>
         <View style={styles.loadingContainer}>
-          <Text style={styles.loadingText}>Loading plan data...</Text>
+          <LinearGradient
+            colors={colorScheme === 'dark' ? ['#1E293B', '#334155'] : ['#F8FAFC', '#E2E8F0']}
+            style={styles.loadingCard}
+          >
+            <Activity size={32} color={colors.primary} />
+            <Text style={styles.loadingText}>Loading plan data...</Text>
+            <Text style={styles.loadingSubtext}>Setting up your workspace</Text>
+          </LinearGradient>
         </View>
       </SafeAreaView>
     );
@@ -628,25 +871,48 @@ export default function CreatePlanScreen() {
         <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
           <ArrowLeft size={24} color={colors.text} />
         </TouchableOpacity>
-        <Text style={styles.title}>
-          {isEditing ? 'Edit Plan' : 'Create Workout Plan'}
-        </Text>
+        <View style={styles.headerCenter}>
+          <Text style={styles.title}>
+            {isEditing ? 'Edit Plan' : 'Create Workout Plan'}
+          </Text>
+          <Text style={styles.subtitle}>
+            {isEditing ? 'Update your training plan' : 'Design a personalized training program'}
+          </Text>
+        </View>
         <TouchableOpacity
           style={[styles.saveButton, saving && styles.saveButtonDisabled]}
           onPress={handleSavePlan}
           disabled={saving}
         >
-          <Save size={16} color="#FFFFFF" />
-          <Text style={styles.saveButtonText}>
-            {saving ? 'Saving...' : 'Save'}
-          </Text>
+          <LinearGradient
+            colors={saving ? ['#9CA3AF', '#6B7280'] : ['#10B981', '#059669']}
+            style={styles.saveButtonGradient}
+          >
+            {saving ? (
+              <Activity size={16} color="#FFFFFF" />
+            ) : (
+              <Save size={16} color="#FFFFFF" />
+            )}
+            <Text style={styles.saveButtonText}>
+              {saving ? 'Saving...' : 'Save'}
+            </Text>
+          </LinearGradient>
         </TouchableOpacity>
       </View>
 
-      <ScrollView style={styles.content} showsVerticalScrollIndicator={false}>
+      <Animated.ScrollView 
+        style={[styles.content, { opacity: fadeAnim, transform: [{ translateY: slideAnim }] }]} 
+        showsVerticalScrollIndicator={false}
+      >
+        {/* Progress Header */}
+        {renderProgressHeader()}
+
         {/* Basic Information */}
         <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Plan Information</Text>
+          <View style={styles.sectionHeader}>
+            <Target size={20} color={colors.primary} />
+            <Text style={styles.sectionTitle}>Plan Information</Text>
+          </View>
           
           <View style={styles.formField}>
             <Text style={styles.fieldLabel}>Plan Name *</Text>
@@ -654,7 +920,7 @@ export default function CreatePlanScreen() {
               style={styles.textInput}
               value={planName}
               onChangeText={setPlanName}
-              placeholder="Enter plan name"
+              placeholder="e.g., Summer Shred Program"
               placeholderTextColor={colors.textTertiary}
             />
           </View>
@@ -665,7 +931,7 @@ export default function CreatePlanScreen() {
               style={[styles.textInput, styles.textArea]}
               value={planDescription}
               onChangeText={setPlanDescription}
-              placeholder="Describe this workout plan..."
+              placeholder="Describe the goals and focus of this workout plan..."
               placeholderTextColor={colors.textTertiary}
               multiline
               numberOfLines={3}
@@ -676,7 +942,8 @@ export default function CreatePlanScreen() {
         {/* Client Selection */}
         <View style={styles.section}>
           <View style={styles.sectionHeader}>
-            <Text style={styles.sectionTitle}>Client Assignment *</Text>
+            <User size={20} color={colors.primary} />
+            <Text style={styles.sectionTitle}>Client Assignment</Text>
             <TouchableOpacity 
               style={styles.refreshButton}
               onPress={handleRefreshClients}
@@ -687,31 +954,45 @@ export default function CreatePlanScreen() {
           
           {clients.length === 0 ? (
             <View style={styles.noClientsContainer}>
-              <Users size={48} color={colors.textTertiary} />
-              <Text style={styles.noClientsTitle}>No Clients Found</Text>
-              <Text style={styles.noClientsText}>
-                You don't have any assigned clients yet. Make sure you have active client assignments in the database.
-              </Text>
-              <TouchableOpacity 
-                style={styles.refreshClientsButton}
-                onPress={handleRefreshClients}
+              <LinearGradient
+                colors={colorScheme === 'dark' ? ['#1E293B', '#334155'] : ['#FEF3C7', '#FDE68A']}
+                style={styles.noClientsCard}
               >
-                <RefreshCw size={16} color={colors.primary} />
-                <Text style={styles.refreshClientsText}>Refresh Clients</Text>
-              </TouchableOpacity>
+                <Users size={48} color={colors.warning} />
+                <Text style={styles.noClientsTitle}>No Clients Found</Text>
+                <Text style={styles.noClientsText}>
+                  You don't have any assigned clients yet. Make sure you have active client assignments in the database.
+                </Text>
+                <TouchableOpacity 
+                  style={styles.refreshClientsButton}
+                  onPress={handleRefreshClients}
+                >
+                  <RefreshCw size={16} color={colors.primary} />
+                  <Text style={styles.refreshClientsText}>Refresh Clients</Text>
+                </TouchableOpacity>
+              </LinearGradient>
             </View>
           ) : (
             <TouchableOpacity
-              style={styles.picker}
+              style={[styles.picker, selectedClient && styles.pickerSelected]}
               onPress={() => setShowClientPicker(true)}
             >
-              <User size={20} color={colors.textSecondary} />
-              <Text style={[
-                styles.pickerText,
-                !selectedClient && styles.placeholderText
-              ]}>
-                {selectedClient ? selectedClient.full_name : 'Select a client'}
-              </Text>
+              <View style={styles.pickerLeft}>
+                <View style={[styles.pickerIcon, selectedClient && styles.pickerIconSelected]}>
+                  <User size={20} color={selectedClient ? '#FFFFFF' : colors.textSecondary} />
+                </View>
+                <View style={styles.pickerContent}>
+                  <Text style={[
+                    styles.pickerText,
+                    !selectedClient && styles.placeholderText
+                  ]}>
+                    {selectedClient ? selectedClient.full_name : 'Select a client'}
+                  </Text>
+                  {selectedClient && (
+                    <Text style={styles.pickerSubtext}>{selectedClient.email}</Text>
+                  )}
+                </View>
+              </View>
               <ChevronDown size={20} color={colors.textSecondary} />
             </TouchableOpacity>
           )}
@@ -719,23 +1000,51 @@ export default function CreatePlanScreen() {
 
         {/* Schedule Type */}
         <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Schedule Type *</Text>
-          <TouchableOpacity
-            style={styles.picker}
-            onPress={() => setShowScheduleTypePicker(true)}
-          >
-            <Calendar size={20} color={colors.textSecondary} />
-            <Text style={styles.pickerText}>
-              {scheduleType === 'weekly' ? 'Weekly Repeat' :
-               scheduleType === 'monthly' ? 'Monthly Plan' : 'Custom Schedule'}
-            </Text>
-            <ChevronDown size={20} color={colors.textSecondary} />
-          </TouchableOpacity>
+          <View style={styles.sectionHeader}>
+            <Calendar size={20} color={colors.primary} />
+            <Text style={styles.sectionTitle}>Schedule Type</Text>
+          </View>
+          
+          <View style={styles.scheduleTypeGrid}>
+            {scheduleTypeOptions.map((option) => (
+              <TouchableOpacity
+                key={option.value}
+                style={[
+                  styles.scheduleTypeCard,
+                  scheduleType === option.value && styles.scheduleTypeCardSelected
+                ]}
+                onPress={() => setScheduleType(option.value as ScheduleType)}
+              >
+                <LinearGradient
+                  colors={scheduleType === option.value ? option.gradient : ['transparent', 'transparent']}
+                  style={styles.scheduleTypeGradient}
+                >
+                  <Text style={styles.scheduleTypeEmoji}>{option.icon}</Text>
+                  <Text style={[
+                    styles.scheduleTypeLabel,
+                    scheduleType === option.value && styles.scheduleTypeLabelSelected
+                  ]}>
+                    {option.label}
+                  </Text>
+                  <Text style={[
+                    styles.scheduleTypeDescription,
+                    scheduleType === option.value && styles.scheduleTypeDescriptionSelected
+                  ]}>
+                    {option.description}
+                  </Text>
+                </LinearGradient>
+              </TouchableOpacity>
+            ))}
+          </View>
         </View>
 
         {/* Date Range */}
         <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Date Range *</Text>
+          <View style={styles.sectionHeader}>
+            <Clock size={20} color={colors.primary} />
+            <Text style={styles.sectionTitle}>Date Range</Text>
+          </View>
+          
           <View style={styles.dateRow}>
             <View style={styles.dateField}>
               <Text style={styles.fieldLabel}>Start Date</Text>
@@ -743,9 +1052,13 @@ export default function CreatePlanScreen() {
                 style={styles.dateButton}
                 onPress={() => setShowStartDatePicker(true)}
               >
-                <Calendar size={16} color={colors.textSecondary} />
+                <Calendar size={16} color={colors.primary} />
                 <Text style={styles.dateButtonText}>
-                  {startDate.toLocaleDateString()}
+                  {startDate.toLocaleDateString('en-US', { 
+                    month: 'short', 
+                    day: 'numeric',
+                    year: 'numeric'
+                  })}
                 </Text>
               </TouchableOpacity>
             </View>
@@ -755,24 +1068,39 @@ export default function CreatePlanScreen() {
                 style={styles.dateButton}
                 onPress={() => setShowEndDatePicker(true)}
               >
-                <Calendar size={16} color={colors.textSecondary} />
+                <Calendar size={16} color={colors.primary} />
                 <Text style={styles.dateButtonText}>
-                  {endDate.toLocaleDateString()}
+                  {endDate.toLocaleDateString('en-US', { 
+                    month: 'short', 
+                    day: 'numeric',
+                    year: 'numeric'
+                  })}
                 </Text>
               </TouchableOpacity>
             </View>
+          </View>
+          
+          <View style={styles.durationInfo}>
+            <Text style={styles.durationText}>
+              Duration: {Math.ceil((endDate.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24))} days
+            </Text>
           </View>
         </View>
 
         {/* Schedule Builder */}
         <View style={styles.section}>
+          <View style={styles.sectionHeader}>
+            <Dumbbell size={20} color={colors.primary} />
+            <Text style={styles.sectionTitle}>Workout Schedule</Text>
+          </View>
+          
           {scheduleType === 'weekly' && renderWeeklySchedule()}
           {scheduleType === 'monthly' && renderMonthlySchedule()}
           {scheduleType === 'custom' && renderCustomSchedule()}
         </View>
 
         <View style={{ height: 100 }} />
-      </ScrollView>
+      </Animated.ScrollView>
 
       {/* Client Picker Modal */}
       <Modal
@@ -802,61 +1130,24 @@ export default function CreatePlanScreen() {
                   setShowClientPicker(false);
                 }}
               >
+                <View style={styles.clientAvatar}>
+                  <Text style={styles.clientAvatarText}>
+                    {client.full_name.split(' ').map(n => n[0]).join('')}
+                  </Text>
+                </View>
                 <View style={styles.clientInfo}>
                   <Text style={styles.clientName}>{client.full_name}</Text>
                   <Text style={styles.clientEmail}>{client.email}</Text>
+                  <Text style={styles.clientJoined}>
+                    Joined {new Date(client.created_at).toLocaleDateString()}
+                  </Text>
                 </View>
                 {selectedClient?.id === client.id && (
-                  <Text style={styles.selectedIndicator}>✓</Text>
+                  <CheckCircle size={24} color={colors.success} />
                 )}
               </TouchableOpacity>
             ))}
           </ScrollView>
-        </SafeAreaView>
-      </Modal>
-
-      {/* Schedule Type Picker Modal */}
-      <Modal
-        visible={showScheduleTypePicker}
-        animationType="slide"
-        presentationStyle="pageSheet"
-        onRequestClose={() => setShowScheduleTypePicker(false)}
-      >
-        <SafeAreaView style={styles.modalContainer}>
-          <View style={styles.modalHeader}>
-            <Text style={styles.modalTitle}>Schedule Type</Text>
-            <TouchableOpacity onPress={() => setShowScheduleTypePicker(false)}>
-              <X size={24} color={colors.text} />
-            </TouchableOpacity>
-          </View>
-          
-          <View style={styles.scheduleTypeList}>
-            {[
-              { value: 'weekly', label: 'Weekly Repeat', description: 'Same pattern every week' },
-              { value: 'monthly', label: 'Monthly Plan', description: 'Different patterns for each week' },
-              { value: 'custom', label: 'Custom Schedule', description: 'Specific dates with custom workouts' },
-            ].map((type) => (
-              <TouchableOpacity
-                key={type.value}
-                style={[
-                  styles.scheduleTypeOption,
-                  scheduleType === type.value && styles.selectedScheduleTypeOption
-                ]}
-                onPress={() => {
-                  setScheduleType(type.value as ScheduleType);
-                  setShowScheduleTypePicker(false);
-                }}
-              >
-                <View style={styles.scheduleTypeInfo}>
-                  <Text style={styles.scheduleTypeLabel}>{type.label}</Text>
-                  <Text style={styles.scheduleTypeDescription}>{type.description}</Text>
-                </View>
-                {scheduleType === type.value && (
-                  <Text style={styles.selectedIndicator}>✓</Text>
-                )}
-              </TouchableOpacity>
-            ))}
-          </View>
         </SafeAreaView>
       </Modal>
 
@@ -881,9 +1172,13 @@ export default function CreatePlanScreen() {
               style={styles.templateOption}
               onPress={() => handleTemplateSelect(null)}
             >
+              <View style={styles.templateIcon}>
+                <Text style={styles.templateEmoji}>😴</Text>
+              </View>
               <View style={styles.templateInfo}>
                 <Text style={styles.templateName}>Rest Day</Text>
-                <Text style={styles.templateCategory}>No workout scheduled</Text>
+                <Text style={styles.templateCategory}>Recovery & Rest</Text>
+                <Text style={styles.templateDescription}>No workout scheduled</Text>
               </View>
             </TouchableOpacity>
 
@@ -894,14 +1189,28 @@ export default function CreatePlanScreen() {
                 style={styles.templateOption}
                 onPress={() => handleTemplateSelect(template.id)}
               >
+                <View style={styles.templateIcon}>
+                  <Dumbbell size={24} color={colors.primary} />
+                </View>
                 <View style={styles.templateInfo}>
                   <Text style={styles.templateName}>{template.name}</Text>
                   <Text style={styles.templateCategory}>{template.category}</Text>
-                  <Text style={styles.templateDuration}>
-                    {template.estimated_duration_minutes} minutes
-                  </Text>
+                  <View style={styles.templateMeta}>
+                    <View style={styles.templateMetaItem}>
+                      <Timer size={14} color={colors.textSecondary} />
+                      <Text style={styles.templateDuration}>
+                        {template.estimated_duration_minutes} min
+                      </Text>
+                    </View>
+                    {template.is_public && (
+                      <View style={styles.templateMetaItem}>
+                        <Star size={14} color={colors.warning} />
+                        <Text style={styles.templatePublic}>Public</Text>
+                      </View>
+                    )}
+                  </View>
                 </View>
-                <Dumbbell size={20} color={colors.primary} />
+                <ChevronDown size={20} color={colors.textTertiary} />
               </TouchableOpacity>
             ))}
           </ScrollView>
@@ -958,11 +1267,29 @@ const createStyles = (colors: any) => StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
+    paddingHorizontal: 40,
+  },
+  loadingCard: {
+    alignItems: 'center',
+    padding: 40,
+    borderRadius: 20,
+    shadowColor: colors.shadow,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 1,
+    shadowRadius: 12,
+    elevation: 8,
   },
   loadingText: {
+    fontFamily: 'Inter-SemiBold',
+    fontSize: 18,
+    color: colors.text,
+    marginTop: 16,
+  },
+  loadingSubtext: {
     fontFamily: 'Inter-Regular',
-    fontSize: 16,
+    fontSize: 14,
     color: colors.textSecondary,
+    marginTop: 4,
   },
   header: {
     flexDirection: 'row',
@@ -974,26 +1301,44 @@ const createStyles = (colors: any) => StyleSheet.create({
     borderBottomColor: colors.border,
   },
   backButton: {
-    padding: 4,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: colors.surfaceSecondary,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  headerCenter: {
+    flex: 1,
+    alignItems: 'center',
+    paddingHorizontal: 16,
   },
   title: {
     fontFamily: 'Inter-Bold',
-    fontSize: 18,
+    fontSize: 20,
     color: colors.text,
-    flex: 1,
     textAlign: 'center',
   },
+  subtitle: {
+    fontFamily: 'Inter-Regular',
+    fontSize: 12,
+    color: colors.textSecondary,
+    textAlign: 'center',
+    marginTop: 2,
+  },
   saveButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: colors.primary,
     borderRadius: 20,
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    gap: 4,
+    overflow: 'hidden',
   },
   saveButtonDisabled: {
     opacity: 0.6,
+  },
+  saveButtonGradient: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    gap: 6,
   },
   saveButtonText: {
     fontFamily: 'Inter-SemiBold',
@@ -1003,28 +1348,90 @@ const createStyles = (colors: any) => StyleSheet.create({
   content: {
     flex: 1,
   },
-  section: {
+  progressHeader: {
+    paddingHorizontal: 20,
+    paddingTop: 20,
+    paddingBottom: 10,
+  },
+  progressCard: {
+    borderRadius: 16,
     padding: 20,
+    shadowColor: colors.shadow,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 1,
+    shadowRadius: 8,
+    elevation: 4,
+  },
+  progressInfo: {
+    marginBottom: 16,
+  },
+  progressTitle: {
+    fontFamily: 'Inter-SemiBold',
+    fontSize: 16,
+    color: colors.text,
+  },
+  progressSubtitle: {
+    fontFamily: 'Inter-Regular',
+    fontSize: 14,
+    color: colors.textSecondary,
+    marginTop: 2,
+  },
+  progressBarContainer: {
+    marginBottom: 16,
+  },
+  progressBarBackground: {
+    height: 6,
+    backgroundColor: colors.borderLight,
+    borderRadius: 3,
+    overflow: 'hidden',
+  },
+  progressBarFill: {
+    height: '100%',
+    backgroundColor: colors.primary,
+    borderRadius: 3,
+  },
+  statsRow: {
+    flexDirection: 'row',
+    gap: 20,
+  },
+  statItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  statText: {
+    fontFamily: 'Inter-Medium',
+    fontSize: 12,
+    color: colors.textSecondary,
+  },
+  section: {
+    paddingHorizontal: 20,
+    paddingVertical: 24,
     borderBottomWidth: 1,
     borderBottomColor: colors.borderLight,
   },
   sectionHeader: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 16,
+    marginBottom: 20,
+    gap: 8,
   },
   sectionTitle: {
     fontFamily: 'Inter-SemiBold',
     fontSize: 18,
     color: colors.text,
-    marginBottom: 16,
+    flex: 1,
   },
   refreshButton: {
-    padding: 4,
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: colors.surfaceSecondary,
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   formField: {
-    marginBottom: 16,
+    marginBottom: 20,
   },
   fieldLabel: {
     fontFamily: 'Inter-Medium',
@@ -1039,12 +1446,12 @@ const createStyles = (colors: any) => StyleSheet.create({
     backgroundColor: colors.surface,
     borderWidth: 1,
     borderColor: colors.border,
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 12,
+    borderRadius: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 14,
   },
   textArea: {
-    minHeight: 80,
+    minHeight: 100,
     textAlignVertical: 'top',
   },
   picker: {
@@ -1053,24 +1460,61 @@ const createStyles = (colors: any) => StyleSheet.create({
     backgroundColor: colors.surface,
     borderWidth: 1,
     borderColor: colors.border,
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 12,
-    gap: 8,
+    borderRadius: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+  },
+  pickerSelected: {
+    borderColor: colors.primary,
+    backgroundColor: colors.primary + '10',
+  },
+  pickerLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+    gap: 12,
+  },
+  pickerIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: colors.surfaceSecondary,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  pickerIconSelected: {
+    backgroundColor: colors.primary,
+  },
+  pickerContent: {
+    flex: 1,
   },
   pickerText: {
-    fontFamily: 'Inter-Regular',
+    fontFamily: 'Inter-Medium',
     fontSize: 16,
     color: colors.text,
-    flex: 1,
+  },
+  pickerSubtext: {
+    fontFamily: 'Inter-Regular',
+    fontSize: 12,
+    color: colors.textSecondary,
+    marginTop: 2,
   },
   placeholderText: {
     color: colors.textTertiary,
   },
   noClientsContainer: {
+    marginTop: 8,
+  },
+  noClientsCard: {
     alignItems: 'center',
     paddingVertical: 40,
     paddingHorizontal: 20,
+    borderRadius: 16,
+    shadowColor: colors.shadow,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 1,
+    shadowRadius: 8,
+    elevation: 4,
   },
   noClientsTitle: {
     fontFamily: 'Inter-SemiBold',
@@ -1090,16 +1534,59 @@ const createStyles = (colors: any) => StyleSheet.create({
   refreshClientsButton: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: colors.surfaceSecondary,
-    borderRadius: 8,
-    paddingHorizontal: 16,
+    backgroundColor: colors.surface,
+    borderRadius: 12,
+    paddingHorizontal: 20,
     paddingVertical: 12,
     gap: 8,
+    shadowColor: colors.shadow,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 1,
+    shadowRadius: 4,
+    elevation: 2,
   },
   refreshClientsText: {
     fontFamily: 'Inter-SemiBold',
     fontSize: 14,
     color: colors.primary,
+  },
+  scheduleTypeGrid: {
+    gap: 12,
+  },
+  scheduleTypeCard: {
+    borderRadius: 16,
+    overflow: 'hidden',
+    borderWidth: 2,
+    borderColor: colors.border,
+  },
+  scheduleTypeCardSelected: {
+    borderColor: colors.primary,
+  },
+  scheduleTypeGradient: {
+    padding: 20,
+    alignItems: 'center',
+  },
+  scheduleTypeEmoji: {
+    fontSize: 32,
+    marginBottom: 12,
+  },
+  scheduleTypeLabel: {
+    fontFamily: 'Inter-SemiBold',
+    fontSize: 16,
+    color: colors.text,
+    marginBottom: 4,
+  },
+  scheduleTypeLabelSelected: {
+    color: '#FFFFFF',
+  },
+  scheduleTypeDescription: {
+    fontFamily: 'Inter-Regular',
+    fontSize: 12,
+    color: colors.textSecondary,
+    textAlign: 'center',
+  },
+  scheduleTypeDescriptionSelected: {
+    color: 'rgba(255, 255, 255, 0.8)',
   },
   dateRow: {
     flexDirection: 'row',
@@ -1114,52 +1601,113 @@ const createStyles = (colors: any) => StyleSheet.create({
     backgroundColor: colors.surface,
     borderWidth: 1,
     borderColor: colors.border,
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 12,
+    borderRadius: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 14,
     gap: 8,
   },
   dateButtonText: {
-    fontFamily: 'Inter-Regular',
-    fontSize: 16,
+    fontFamily: 'Inter-Medium',
+    fontSize: 14,
     color: colors.text,
+  },
+  durationInfo: {
+    marginTop: 12,
+    alignItems: 'center',
+  },
+  durationText: {
+    fontFamily: 'Inter-Medium',
+    fontSize: 12,
+    color: colors.textSecondary,
   },
   scheduleContainer: {
     marginTop: 8,
+  },
+  scheduleHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 20,
+  },
+  scheduleHeaderLeft: {
+    flex: 1,
   },
   scheduleTitle: {
     fontFamily: 'Inter-SemiBold',
     fontSize: 16,
     color: colors.text,
-    marginBottom: 16,
   },
-  dayRow: {
-    flexDirection: 'row',
+  scheduleSubtitle: {
+    fontFamily: 'Inter-Regular',
+    fontSize: 12,
+    color: colors.textSecondary,
+    marginTop: 2,
+  },
+  scheduleIcon: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: colors.surfaceSecondary,
+    justifyContent: 'center',
     alignItems: 'center',
-    marginBottom: 12,
   },
-  dayLabel: {
-    fontFamily: 'Inter-Medium',
-    fontSize: 14,
-    color: colors.text,
-    width: 80,
+  scheduleEmoji: {
+    fontSize: 24,
   },
-  templateButton: {
-    flex: 1,
+  daysGrid: {
     flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  dayCard: {
+    width: (width - 56) / 4,
     backgroundColor: colors.surface,
+    borderRadius: 12,
+    padding: 12,
+    alignItems: 'center',
     borderWidth: 1,
     borderColor: colors.border,
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
+    minHeight: 100,
   },
-  templateButtonText: {
-    fontFamily: 'Inter-Regular',
-    fontSize: 14,
+  dayCardActive: {
+    borderColor: colors.primary,
+    backgroundColor: colors.primary + '10',
+  },
+  dayName: {
+    fontFamily: 'Inter-SemiBold',
+    fontSize: 12,
     color: colors.text,
+    marginBottom: 8,
+  },
+  workoutInfo: {
+    alignItems: 'center',
+    flex: 1,
+    justifyContent: 'center',
+  },
+  workoutName: {
+    fontFamily: 'Inter-Medium',
+    fontSize: 10,
+    color: colors.text,
+    textAlign: 'center',
+    marginTop: 4,
+    marginBottom: 4,
+  },
+  workoutDuration: {
+    fontFamily: 'Inter-Regular',
+    fontSize: 9,
+    color: colors.textSecondary,
+  },
+  restDay: {
+    alignItems: 'center',
+    flex: 1,
+    justifyContent: 'center',
+  },
+  restDayText: {
+    fontFamily: 'Inter-Regular',
+    fontSize: 10,
+    color: colors.textTertiary,
+    marginTop: 4,
+    textAlign: 'center',
   },
   weekContainer: {
     marginBottom: 24,
@@ -1179,64 +1727,153 @@ const createStyles = (colors: any) => StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: colors.surfaceSecondary,
-    borderRadius: 6,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
     gap: 4,
   },
   copyButtonText: {
     fontFamily: 'Inter-Medium',
-    fontSize: 12,
+    fontSize: 11,
     color: colors.primary,
   },
-  customHeader: {
+  weekDaysGrid: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 16,
+    flexWrap: 'wrap',
+    gap: 6,
   },
-  addButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: colors.surfaceSecondary,
+  monthlyDayCard: {
+    width: (width - 56) / 7,
+    backgroundColor: colors.surface,
     borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    gap: 4,
+    padding: 8,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: colors.border,
+    minHeight: 60,
   },
-  addButtonText: {
+  monthlyDayCardActive: {
+    borderColor: colors.primary,
+    backgroundColor: colors.primary + '10',
+  },
+  monthlyDayName: {
     fontFamily: 'Inter-SemiBold',
-    fontSize: 14,
-    color: colors.primary,
+    fontSize: 10,
+    color: colors.text,
+    marginBottom: 4,
+  },
+  monthlyWorkoutInfo: {
+    alignItems: 'center',
+    flex: 1,
+    justifyContent: 'center',
+  },
+  monthlyWorkoutName: {
+    fontFamily: 'Inter-Medium',
+    fontSize: 8,
+    color: colors.text,
+    textAlign: 'center',
+    marginBottom: 2,
+  },
+  monthlyWorkoutDuration: {
+    fontFamily: 'Inter-Regular',
+    fontSize: 7,
+    color: colors.textSecondary,
+  },
+  monthlyRestDay: {
+    alignItems: 'center',
+    flex: 1,
+    justifyContent: 'center',
+  },
+  addCustomButton: {
+    marginBottom: 20,
+    borderRadius: 12,
+    overflow: 'hidden',
+  },
+  addCustomGradient: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 16,
+    gap: 8,
+  },
+  addCustomText: {
+    fontFamily: 'Inter-SemiBold',
+    fontSize: 16,
+    color: '#FFFFFF',
   },
   emptyCustom: {
     alignItems: 'center',
     paddingVertical: 40,
   },
+  emptyCustomTitle: {
+    fontFamily: 'Inter-SemiBold',
+    fontSize: 18,
+    color: colors.text,
+    marginTop: 16,
+    marginBottom: 8,
+  },
   emptyCustomText: {
     fontFamily: 'Inter-Regular',
     fontSize: 14,
     color: colors.textSecondary,
+    textAlign: 'center',
+    lineHeight: 20,
   },
-  customWorkoutRow: {
+  customWorkoutsList: {
+    gap: 12,
+  },
+  customWorkoutCard: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 12,
+    backgroundColor: colors.surface,
+    borderRadius: 12,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: colors.border,
   },
-  customWorkoutInfo: {
+  customWorkoutLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+    gap: 16,
+  },
+  customDateContainer: {
+    alignItems: 'center',
+    minWidth: 60,
+  },
+  customWorkoutDate: {
+    fontFamily: 'Inter-SemiBold',
+    fontSize: 14,
+    color: colors.text,
+  },
+  customWorkoutDay: {
+    fontFamily: 'Inter-Regular',
+    fontSize: 12,
+    color: colors.textSecondary,
+  },
+  customTemplateButton: {
     flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 12,
+    justifyContent: 'space-between',
+    backgroundColor: colors.surfaceSecondary,
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
   },
-  customWorkoutDate: {
+  customTemplateName: {
     fontFamily: 'Inter-Medium',
     fontSize: 14,
     color: colors.text,
-    width: 100,
   },
-  removeButton: {
-    padding: 8,
+  removeCustomButton: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: colors.surfaceSecondary,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginLeft: 12,
   },
   modalContainer: {
     flex: 1,
@@ -1259,20 +1896,39 @@ const createStyles = (colors: any) => StyleSheet.create({
   clientList: {
     flex: 1,
     paddingHorizontal: 20,
+    paddingTop: 16,
   },
   clientOption: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
     backgroundColor: colors.surface,
-    borderRadius: 12,
+    borderRadius: 16,
     padding: 16,
-    marginVertical: 4,
+    marginBottom: 12,
+    shadowColor: colors.shadow,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 1,
+    shadowRadius: 4,
+    elevation: 2,
   },
   selectedClientOption: {
     backgroundColor: colors.primary + '20',
     borderWidth: 1,
     borderColor: colors.primary,
+  },
+  clientAvatar: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: colors.primary,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 16,
+  },
+  clientAvatarText: {
+    fontFamily: 'Inter-Bold',
+    fontSize: 16,
+    color: '#FFFFFF',
   },
   clientInfo: {
     flex: 1,
@@ -1287,55 +1943,42 @@ const createStyles = (colors: any) => StyleSheet.create({
     fontFamily: 'Inter-Regular',
     fontSize: 14,
     color: colors.textSecondary,
+    marginBottom: 2,
   },
-  selectedIndicator: {
-    fontFamily: 'Inter-Bold',
-    fontSize: 16,
-    color: colors.primary,
-  },
-  scheduleTypeList: {
-    padding: 20,
-  },
-  scheduleTypeOption: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    backgroundColor: colors.surface,
-    borderRadius: 12,
-    padding: 16,
-    marginBottom: 8,
-  },
-  selectedScheduleTypeOption: {
-    backgroundColor: colors.primary + '20',
-    borderWidth: 1,
-    borderColor: colors.primary,
-  },
-  scheduleTypeInfo: {
-    flex: 1,
-  },
-  scheduleTypeLabel: {
-    fontFamily: 'Inter-SemiBold',
-    fontSize: 16,
-    color: colors.text,
-    marginBottom: 4,
-  },
-  scheduleTypeDescription: {
+  clientJoined: {
     fontFamily: 'Inter-Regular',
-    fontSize: 14,
-    color: colors.textSecondary,
+    fontSize: 12,
+    color: colors.textTertiary,
   },
   templateList: {
     flex: 1,
     paddingHorizontal: 20,
+    paddingTop: 16,
   },
   templateOption: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
     backgroundColor: colors.surface,
-    borderRadius: 12,
+    borderRadius: 16,
     padding: 16,
-    marginBottom: 8,
+    marginBottom: 12,
+    shadowColor: colors.shadow,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 1,
+    shadowRadius: 4,
+    elevation: 2,
+  },
+  templateIcon: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: colors.surfaceSecondary,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 16,
+  },
+  templateEmoji: {
+    fontSize: 24,
   },
   templateInfo: {
     flex: 1,
@@ -1350,11 +1993,31 @@ const createStyles = (colors: any) => StyleSheet.create({
     fontFamily: 'Inter-Medium',
     fontSize: 12,
     color: colors.primary,
-    marginBottom: 2,
+    marginBottom: 6,
+  },
+  templateDescription: {
+    fontFamily: 'Inter-Regular',
+    fontSize: 12,
+    color: colors.textSecondary,
+    marginBottom: 6,
+  },
+  templateMeta: {
+    flexDirection: 'row',
+    gap: 12,
+  },
+  templateMetaItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
   },
   templateDuration: {
     fontFamily: 'Inter-Regular',
     fontSize: 12,
     color: colors.textSecondary,
+  },
+  templatePublic: {
+    fontFamily: 'Inter-Regular',
+    fontSize: 12,
+    color: colors.warning,
   },
 });
