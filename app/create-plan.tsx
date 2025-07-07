@@ -8,7 +8,6 @@ import {
   TextInput,
   Alert,
   Modal,
-  Platform,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { 
@@ -18,27 +17,17 @@ import {
   X,
   Plus,
   Trash2,
-  Copy,
-  Save
+  Copy
 } from 'lucide-react-native';
 import { useColorScheme, getColors } from '@/hooks/useColorScheme';
 import { router, useLocalSearchParams } from 'expo-router';
-import DateTimePicker from '@react-native-community/datetimepicker';
-import {
-  getTrainerClients,
-  getWorkoutTemplatesForPlans,
-  createWorkoutPlan,
-  updateWorkoutPlan,
-  getWorkoutPlan,
-  createPlanSessions,
-  deletePlanSessions,
-  ClientProfile,
-  WorkoutPlan,
-} from '@/lib/planDatabase';
+import { WorkoutPlan, Client, WorkoutTemplate, DayOfWeek } from '@/types/workout';
+import { generateId, getWeekDates } from '@/utils/workoutUtils';
+import { supabase } from '@/lib/supabase';
 
-const daysOfWeek = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+const daysOfWeek: DayOfWeek[] = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
 
-type ScheduleType = 'weekly' | 'monthly' | 'custom';
+type ScheduleType = 'weekly' | 'monthly' | 'custom' | 'session';
 
 interface CustomScheduleDay {
   id: string;
@@ -47,32 +36,24 @@ interface CustomScheduleDay {
   label?: string;
 }
 
-interface WorkoutTemplate {
-  id: string;
-  name: string;
-  category: string;
-  estimated_duration_minutes: number;
-}
-
 export default function CreatePlanScreen() {
   const colorScheme = useColorScheme();
-  const colors = getColors(colorScheme);
+  const colors = getColors(colorScheme as 'light' | 'dark' | null);
   const styles = createStyles(colors);
   const { edit } = useLocalSearchParams();
 
   const [planName, setPlanName] = useState('');
-  const [planDescription, setPlanDescription] = useState('');
-  const [selectedClient, setSelectedClient] = useState<ClientProfile | null>(null);
-  const [startDate, setStartDate] = useState(new Date());
+  const [selectedClient, setSelectedClient] = useState<Client | null>(null);
+  const [startDate, setStartDate] = useState(new Date().toISOString().split('T')[0]);
   const [endDate, setEndDate] = useState(() => {
     const date = new Date();
     date.setDate(date.getDate() + 28); // 4 weeks default
-    return date;
+    return date.toISOString().split('T')[0];
   });
   
   // Schedule type and data
   const [scheduleType, setScheduleType] = useState<ScheduleType>('weekly');
-  const [weeklySchedule, setWeeklySchedule] = useState<{ [key: string]: string | null }>({
+  const [weeklySchedule, setWeeklySchedule] = useState<{ [key in DayOfWeek]: string | null }>({
     Monday: null,
     Tuesday: null,
     Wednesday: null,
@@ -81,22 +62,21 @@ export default function CreatePlanScreen() {
     Saturday: null,
     Sunday: null,
   });
-  const [monthlySchedule, setMonthlySchedule] = useState<{ [week: number]: { [key: string]: string | null } }>({
+  const [monthlySchedule, setMonthlySchedule] = useState<{ [week: number]: { [key in DayOfWeek]: string | null } }>({
     1: { Monday: null, Tuesday: null, Wednesday: null, Thursday: null, Friday: null, Saturday: null, Sunday: null },
     2: { Monday: null, Tuesday: null, Wednesday: null, Thursday: null, Friday: null, Saturday: null, Sunday: null },
     3: { Monday: null, Tuesday: null, Wednesday: null, Thursday: null, Friday: null, Saturday: null, Sunday: null },
     4: { Monday: null, Tuesday: null, Wednesday: null, Thursday: null, Friday: null, Saturday: null, Sunday: null },
   });
   const [customSchedule, setCustomSchedule] = useState<CustomScheduleDay[]>([]);
+  const [sessionSchedule, setSessionSchedule] = useState<{ [key: string]: string | null }>({});
 
-  const [clients, setClients] = useState<ClientProfile[]>([]);
+  const [clients, setClients] = useState<Client[]>([]);
   const [templates, setTemplates] = useState<WorkoutTemplate[]>([]);
   const [showClientPicker, setShowClientPicker] = useState(false);
   const [showTemplatePicker, setShowTemplatePicker] = useState(false);
   const [showScheduleTypePicker, setShowScheduleTypePicker] = useState(false);
-  const [showStartDatePicker, setShowStartDatePicker] = useState(false);
-  const [showEndDatePicker, setShowEndDatePicker] = useState(false);
-  const [selectedDay, setSelectedDay] = useState<string | null>(null);
+  const [selectedDay, setSelectedDay] = useState<DayOfWeek | null>(null);
   const [selectedWeek, setSelectedWeek] = useState<number | null>(null);
   const [selectedCustomDay, setSelectedCustomDay] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -112,39 +92,247 @@ export default function CreatePlanScreen() {
 
   const loadData = async () => {
     try {
-      const [loadedClients, loadedTemplates] = await Promise.all([
-        getTrainerClients(),
-        getWorkoutTemplatesForPlans()
-      ]);
-      setClients(loadedClients);
-      setTemplates(loadedTemplates);
+      // Get current user
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) {
+        setClients([]);
+        setTemplates([]);
+        return;
+      }
+
+      // Get user profile (trainers are in clients table)
+      const { data: profileData, error: profileError } = await supabase
+        .from('clients')
+        .select('id')
+        .eq('user_id', user.id)
+        .single();
+      
+      if (profileError || !profileData) {
+        setClients([]);
+        setTemplates([]);
+        return;
+      }
+
+      // Fetch only assigned clients for this trainer (simplified like TrainerNewSessionsView)
+      try {
+        // Get current trainer ID from Supabase Auth
+        const { data: userData, error: userError } = await supabase.auth.getUser();
+        if (userError || !userData?.user?.id) {
+          setClients([]);
+          return;
+        }
+        const trainerId = userData.user.id;
+        
+        // Fetch assigned client IDs from client_assignments table
+        const { data: assignments, error: assignError } = await supabase
+          .from('client_assignments')
+          .select('client_id')
+          .eq('trainer_id', trainerId)
+          .eq('status', 'active');
+        
+        if (assignError) throw assignError;
+        
+        const assignedClientIds = (assignments || []).map((a: any) => a.client_id).filter(Boolean);
+        if (assignedClientIds.length === 0) {
+          setClients([]);
+          return;
+        }
+        
+        // Fetch client profiles from profiles table
+        const { data: clientsData, error: clientsError } = await supabase
+          .from('profiles')
+          .select('id, full_name, email, avatar')
+          .in('id', assignedClientIds);
+        
+        if (clientsError) throw clientsError;
+        
+        const transformedClients: Client[] = (clientsData || []).map((c: any) => ({
+          id: c.id,
+          name: c.full_name || c.email || 'Unknown Client',
+          email: c.email || '',
+          avatar: c.avatar || '👤',
+          joinDate: new Date().toISOString().split('T')[0], // Default to today
+          trainerId: trainerId
+        }));
+        
+        console.log('Transformed clients:', transformedClients);
+        setClients(transformedClients);
+      } catch (error) {
+        console.error('Error fetching assigned clients:', error);
+        setClients([]);
+      }
+
+      // Load templates (public and user-created)
+      const { data: templatesData, error: templatesError } = await supabase
+        .from('workout_templates')
+        .select(`
+          *,
+          template_exercises (
+            *,
+            exercise:exercises (*)
+          )
+        `)
+        .or(`is_public.eq.true,created_by.eq.${profileData.id}`)
+        .order('created_at', { ascending: false });
+
+      if (templatesError) {
+        console.error('Error loading templates:', templatesError);
+        setTemplates([]);
+      } else {
+        const transformedTemplates: WorkoutTemplate[] = (templatesData || []).map(template => ({
+          id: template.id,
+          name: template.name,
+          description: template.description,
+          category: template.category,
+          duration: template.estimated_duration_minutes || 60,
+          exercises: (template.template_exercises || []).map((te: any) => ({
+            id: te.id,
+            exerciseId: te.exercise_id,
+            exercise: {
+              id: te.exercise?.id || '',
+              name: te.exercise?.name || 'Unknown Exercise',
+              category: te.exercise?.category || 'Unknown',
+              muscleGroups: te.exercise?.muscle_groups || [],
+              instructions: te.exercise?.instructions,
+              equipment: te.exercise?.equipment
+            },
+            sets: te.sets_config ? (() => {
+              try {
+                const parsed = typeof te.sets_config === 'string' ? JSON.parse(te.sets_config) : te.sets_config;
+                return Array.isArray(parsed) && parsed.length > 0 ? parsed : [
+                  { reps: 10, weight: 0, restTime: 60 },
+                  { reps: 10, weight: 0, restTime: 60 },
+                  { reps: 10, weight: 0, restTime: 60 },
+                ];
+              } catch (error) {
+                console.error('Error parsing sets_config:', error);
+                return [
+                  { reps: 10, weight: 0, restTime: 60 },
+                  { reps: 10, weight: 0, restTime: 60 },
+                  { reps: 10, weight: 0, restTime: 60 },
+                ];
+              }
+            })() : [
+              { reps: 10, weight: 0, restTime: 60 },
+              { reps: 10, weight: 0, restTime: 60 },
+              { reps: 10, weight: 0, restTime: 60 },
+            ],
+            order: te.order_index,
+            notes: te.notes
+          })),
+          createdBy: template.created_by,
+          createdAt: template.created_at,
+          updatedAt: template.updated_at,
+          isPublic: template.is_public
+        }));
+        setTemplates(transformedTemplates);
+      }
     } catch (error) {
       console.error('Error loading data:', error);
-      Alert.alert('Error', 'Failed to load data');
+      setClients([]);
+      setTemplates([]);
     }
   };
 
   const loadPlan = async () => {
     try {
       const planId = edit as string;
-      const plan = await getWorkoutPlan(planId);
-      if (plan) {
-        setPlanName(plan.name);
-        setPlanDescription(plan.description || '');
-        setStartDate(new Date(plan.start_date));
-        setEndDate(new Date(plan.end_date));
-        setScheduleType(plan.schedule_type);
+      
+      // Fetch plan from Supabase
+      const { data: planData, error: planError } = await supabase
+        .from('workout_plans')
+        .select(`
+          *,
+          plan_templates (
+            *,
+            template:workout_templates (*)
+          )
+        `)
+        .eq('id', planId)
+        .single();
+
+      if (planError) {
+        console.error('Error loading plan from database:', planError);
+        Alert.alert('Error', 'Failed to load plan');
+        return;
+      }
+
+      if (planData) {
+        setPlanName(planData.name);
+        setStartDate(planData.start_date);
+        setEndDate(planData.end_date);
         
-        // Load schedule data based on type
-        if (plan.schedule_type === 'weekly') {
-          setWeeklySchedule(plan.schedule_data || {});
-        } else if (plan.schedule_type === 'monthly') {
-          setMonthlySchedule(plan.schedule_data || {});
-        } else if (plan.schedule_type === 'custom') {
-          setCustomSchedule(plan.schedule_data || []);
+        // Set schedule based on plan type
+        if (planData.schedule_type === 'weekly') {
+          setScheduleType('weekly');
+          // Convert plan_templates to weekly schedule format
+          const weeklyScheduleData: { [key in DayOfWeek]: string | null } = {
+            Monday: null,
+            Tuesday: null,
+            Wednesday: null,
+            Thursday: null,
+            Friday: null,
+            Saturday: null,
+            Sunday: null,
+          };
+          
+          (planData.plan_templates || []).forEach((pt: any) => {
+            if (pt.day_of_week !== null) {
+              const dayName = daysOfWeek[pt.day_of_week];
+              if (dayName) {
+                weeklyScheduleData[dayName] = pt.template_id;
+              }
+            }
+          });
+          
+          setWeeklySchedule(weeklyScheduleData);
+        } else if (planData.schedule_type === 'monthly') {
+          setScheduleType('monthly');
+          // Convert plan_templates to monthly schedule format
+          const monthlyScheduleData: { [week: number]: { [key in DayOfWeek]: string | null } } = {
+            1: { Monday: null, Tuesday: null, Wednesday: null, Thursday: null, Friday: null, Saturday: null, Sunday: null },
+            2: { Monday: null, Tuesday: null, Wednesday: null, Thursday: null, Friday: null, Saturday: null, Sunday: null },
+            3: { Monday: null, Tuesday: null, Wednesday: null, Thursday: null, Friday: null, Saturday: null, Sunday: null },
+            4: { Monday: null, Tuesday: null, Wednesday: null, Thursday: null, Friday: null, Saturday: null, Sunday: null },
+          };
+          
+          (planData.plan_templates || []).forEach((pt: any) => {
+            if (pt.week_number && pt.day_of_week !== null) {
+              const dayName = daysOfWeek[pt.day_of_week];
+              if (dayName && monthlyScheduleData[pt.week_number]) {
+                monthlyScheduleData[pt.week_number][dayName] = pt.template_id;
+              }
+            }
+          });
+          
+          setMonthlySchedule(monthlyScheduleData);
+        } else if (planData.schedule_type === 'custom') {
+          setScheduleType('custom');
+          // Convert plan_templates to custom schedule format
+          const customScheduleData: CustomScheduleDay[] = (planData.plan_templates || [])
+            .filter((pt: any) => pt.scheduled_date)
+            .map((pt: any) => ({
+              id: pt.id,
+              date: pt.scheduled_date,
+              templateId: pt.template_id,
+              label: `Day ${pt.order_index + 1}`,
+            }));
+          
+          setCustomSchedule(customScheduleData);
+        } else if (planData.schedule_type === 'session') {
+          setScheduleType('session');
+          // Convert plan_templates to session schedule format
+          const sessionScheduleData: { [key: string]: string | null } = {};
+          (planData.plan_templates || []).forEach((pt: any, index: number) => {
+            const sessionId = `session_${pt.id || index}`;
+            sessionScheduleData[sessionId] = pt.template_id;
+          });
+          
+          setSessionSchedule(sessionScheduleData);
         }
         
-        const client = clients.find(c => c.id === plan.client_id);
+        // Set selected client
+        const client = clients.find(c => c.id === planData.client_id);
         if (client) {
           setSelectedClient(client);
         }
@@ -155,11 +343,7 @@ export default function CreatePlanScreen() {
     }
   };
 
-  const generateId = (): string => {
-    return Date.now().toString(36) + Math.random().toString(36).substr(2);
-  };
-
-  const handleDayPress = (day: string, week?: number) => {
+  const handleDayPress = (day: DayOfWeek, week?: number) => {
     setSelectedDay(day);
     setSelectedWeek(week || null);
     setShowTemplatePicker(true);
@@ -190,6 +374,11 @@ export default function CreatePlanScreen() {
           ? { ...day, templateId: template?.id || null }
           : day
       ));
+    } else if (scheduleType === 'session' && selectedCustomDay) {
+      setSessionSchedule(prev => ({
+        ...prev,
+        [selectedCustomDay]: template?.id || null
+      }));
     }
     
     setShowTemplatePicker(false);
@@ -245,6 +434,7 @@ export default function CreatePlanScreen() {
       case 'weekly': return 'Weekly Repeat';
       case 'monthly': return 'Monthly Plan';
       case 'custom': return 'Custom Schedule';
+      case 'session': return 'Session Based';
       default: return 'Weekly Repeat';
     }
   };
@@ -260,7 +450,7 @@ export default function CreatePlanScreen() {
       return;
     }
 
-    if (endDate <= startDate) {
+    if (new Date(endDate) <= new Date(startDate)) {
       Alert.alert('Error', 'End date must be after start date');
       return;
     }
@@ -277,36 +467,164 @@ export default function CreatePlanScreen() {
         return;
       }
       finalSchedule = customSchedule;
+    } else if (scheduleType === 'session') {
+      if (Object.keys(sessionSchedule).length === 0) {
+        Alert.alert('Error', 'Please add at least one session to your plan');
+        return;
+      }
+      finalSchedule = sessionSchedule;
     }
 
     setLoading(true);
     try {
+      // Get current user
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) {
+        Alert.alert('Error', 'User not authenticated');
+        setLoading(false);
+        return;
+      }
+
+      // Get user profile (trainers are in clients table)
+      const { data: profileData, error: profileError } = await supabase
+        .from('clients')
+        .select('id')
+        .eq('user_id', user.id)
+        .single();
+      
+      if (profileError || !profileData) {
+        Alert.alert('Error', 'User profile not found');
+        setLoading(false);
+        return;
+      }
+
+      const planId = isEditing ? (edit as string) : generateId();
+      
+      // Save workout plan
       const planData = {
-        client_id: selectedClient.id,
+        id: planId,
         name: planName.trim(),
-        description: planDescription.trim() || undefined,
-        start_date: startDate.toISOString().split('T')[0],
-        end_date: endDate.toISOString().split('T')[0],
+        description: null,
+        client_id: selectedClient.id,
+        trainer_id: profileData.id,
+        start_date: startDate,
+        end_date: endDate,
         schedule_type: scheduleType,
         schedule_data: finalSchedule,
+        status: 'active',
       };
 
-      let savedPlan;
+      let planResult;
       if (isEditing) {
-        savedPlan = await updateWorkoutPlan(edit as string, planData);
+        const { data, error } = await supabase
+          .from('workout_plans')
+          .update(planData)
+          .eq('id', planId)
+          .select()
+          .single();
+        planResult = { data, error };
       } else {
-        savedPlan = await createWorkoutPlan(planData);
+        const { data, error } = await supabase
+          .from('workout_plans')
+          .insert(planData)
+          .select()
+          .single();
+        planResult = { data, error };
       }
 
-      if (savedPlan) {
-        Alert.alert(
-          'Success',
-          `Plan ${isEditing ? 'updated' : 'created'} successfully!`,
-          [{ text: 'OK', onPress: () => router.back() }]
-        );
-      } else {
-        Alert.alert('Error', 'Failed to save plan');
+      if (planResult.error) {
+        throw planResult.error;
       }
+
+      // Remove existing plan_templates if editing
+      if (isEditing) {
+        await supabase
+          .from('plan_templates')
+          .delete()
+          .eq('plan_id', planId);
+      }
+
+      // Insert plan_templates based on schedule type
+      if (scheduleType === 'weekly') {
+        for (let i = 0; i < daysOfWeek.length; i++) {
+          const day = daysOfWeek[i];
+          const templateId = weeklySchedule[day];
+          if (templateId) {
+            const { error: ptError } = await supabase
+              .from('plan_templates')
+              .insert({
+                plan_id: planId,
+                template_id: templateId,
+                day_of_week: i,
+                order_index: i,
+              });
+            if (ptError) {
+              throw ptError;
+            }
+          }
+        }
+      } else if (scheduleType === 'monthly') {
+        for (let week = 1; week <= 4; week++) {
+          for (let i = 0; i < daysOfWeek.length; i++) {
+            const day = daysOfWeek[i];
+            const templateId = monthlySchedule[week][day];
+            if (templateId) {
+              const { error: ptError } = await supabase
+                .from('plan_templates')
+                .insert({
+                  plan_id: planId,
+                  template_id: templateId,
+                  day_of_week: i,
+                  week_number: week,
+                  order_index: (week - 1) * 7 + i,
+                });
+              if (ptError) {
+                throw ptError;
+              }
+            }
+          }
+        }
+      } else if (scheduleType === 'custom') {
+        for (let i = 0; i < customSchedule.length; i++) {
+          const day = customSchedule[i];
+          if (day.templateId) {
+            const { error: ptError } = await supabase
+              .from('plan_templates')
+              .insert({
+                plan_id: planId,
+                template_id: day.templateId,
+                scheduled_date: day.date,
+                order_index: i,
+              });
+            if (ptError) {
+              throw ptError;
+            }
+          }
+        }
+      } else if (scheduleType === 'session') {
+        let sessionIndex = 0;
+        for (const [sessionId, templateId] of Object.entries(sessionSchedule)) {
+          if (templateId) {
+            const { error: ptError } = await supabase
+              .from('plan_templates')
+              .insert({
+                plan_id: planId,
+                template_id: templateId,
+                order_index: sessionIndex,
+              });
+            if (ptError) {
+              throw ptError;
+            }
+            sessionIndex++;
+          }
+        }
+      }
+
+      Alert.alert(
+        'Success',
+        `Plan ${isEditing ? 'updated' : 'created'} successfully!`,
+        [{ text: 'OK', onPress: () => router.back() }]
+      );
     } catch (error) {
       console.error('Error saving plan:', error);
       Alert.alert('Error', 'Failed to save plan');
@@ -315,22 +633,8 @@ export default function CreatePlanScreen() {
     }
   };
 
-  const onStartDateChange = (event: any, selectedDate?: Date) => {
-    setShowStartDatePicker(false);
-    if (selectedDate) {
-      setStartDate(selectedDate);
-    }
-  };
-
-  const onEndDateChange = (event: any, selectedDate?: Date) => {
-    setShowEndDatePicker(false);
-    if (selectedDate) {
-      setEndDate(selectedDate);
-    }
-  };
-
   const renderWeeklySchedule = () => {
-    const renderDayCard = (day: string) => {
+    const renderDayCard = (day: DayOfWeek) => {
       const templateId = weeklySchedule[day];
       const hasWorkout = templateId !== null;
       
@@ -487,6 +791,83 @@ export default function CreatePlanScreen() {
     );
   };
 
+  const renderSessionSchedule = () => {
+    const sessionIds = Object.keys(sessionSchedule);
+    
+    return (
+      <View style={styles.customContainer}>
+        <View style={styles.customHeader}>
+          <Text style={styles.customTitle}>Sessions ({sessionIds.length})</Text>
+          <TouchableOpacity 
+            style={styles.addDayButton} 
+            onPress={() => {
+              const newSessionId = `session_${Date.now()}`;
+              setSessionSchedule(prev => ({ ...prev, [newSessionId]: null }));
+            }}
+          >
+            <Plus size={16} color={colors.primary} />
+            <Text style={styles.addDayText}>Add Session</Text>
+          </TouchableOpacity>
+        </View>
+
+        {sessionIds.length === 0 ? (
+          <View style={styles.emptyCustom}>
+            <Text style={styles.emptyCustomText}>No sessions added yet</Text>
+            <TouchableOpacity 
+              style={styles.addFirstDayButton} 
+              onPress={() => {
+                const newSessionId = `session_${Date.now()}`;
+                setSessionSchedule(prev => ({ ...prev, [newSessionId]: null }));
+              }}
+            >
+              <Text style={styles.addFirstDayText}>Add First Session</Text>
+            </TouchableOpacity>
+          </View>
+        ) : (
+          sessionIds.map((sessionId, index) => (
+            <View key={sessionId} style={styles.customDayCard}>
+              <View style={styles.customDayHeader}>
+                <View style={styles.customDayInputs}>
+                  <Text style={styles.customDayLabel}>
+                    Session {index + 1}
+                  </Text>
+                </View>
+                <TouchableOpacity
+                  style={styles.removeDayButton}
+                  onPress={() => {
+                    setSessionSchedule(prev => {
+                      const newSchedule = { ...prev };
+                      delete newSchedule[sessionId];
+                      return newSchedule;
+                    });
+                  }}
+                >
+                  <Trash2 size={16} color={colors.error} />
+                </TouchableOpacity>
+              </View>
+              
+              <TouchableOpacity
+                style={[
+                  styles.customWorkoutSelector,
+                  sessionSchedule[sessionId] ? styles.activeCustomWorkout : styles.restCustomWorkout
+                ]}
+                onPress={() => handleCustomDayPress(sessionId)}
+              >
+                <Text style={[
+                  styles.customWorkoutText,
+                  sessionSchedule[sessionId] ? styles.activeCustomWorkoutText : styles.restCustomWorkoutText
+                ]}>
+                  {getTemplateName(sessionSchedule[sessionId])}
+                </Text>
+                <ChevronDown size={16} color={colors.textSecondary} />
+              </TouchableOpacity>
+            </View>
+          ))
+        )}
+      </View>
+    );
+  };
+
   return (
     <SafeAreaView style={styles.container}>
       {/* Header */}
@@ -502,7 +883,6 @@ export default function CreatePlanScreen() {
           onPress={handleSavePlan}
           disabled={loading}
         >
-          <Save size={16} color="#FFFFFF" />
           <Text style={styles.saveButtonText}>
             {loading ? 'Saving...' : 'Save'}
           </Text>
@@ -526,19 +906,6 @@ export default function CreatePlanScreen() {
           </View>
 
           <View style={styles.formField}>
-            <Text style={styles.fieldLabel}>Description</Text>
-            <TextInput
-              style={[styles.textInput, styles.textArea]}
-              value={planDescription}
-              onChangeText={setPlanDescription}
-              placeholder="Describe this workout plan..."
-              placeholderTextColor={colors.textTertiary}
-              multiline
-              numberOfLines={3}
-            />
-          </View>
-
-          <View style={styles.formField}>
             <Text style={styles.fieldLabel}>Client *</Text>
             <TouchableOpacity
               style={styles.picker}
@@ -548,37 +915,96 @@ export default function CreatePlanScreen() {
                 styles.pickerText,
                 !selectedClient && styles.placeholderText
               ]}>
-                {selectedClient?.full_name || 'Select a client'}
+                {selectedClient?.name || 'Select a client'}
               </Text>
               <ChevronDown size={20} color={colors.textSecondary} />
+            </TouchableOpacity>
+            
+            {/* Debug button */}
+            <TouchableOpacity
+              style={{ 
+                backgroundColor: colors.primary, 
+                padding: 8, 
+                borderRadius: 6, 
+                marginTop: 8,
+                alignItems: 'center'
+              }}
+              onPress={() => {
+                console.log('Current clients state:', clients);
+                console.log('Clients length:', clients.length);
+                loadData();
+              }}
+            >
+              <Text style={{ color: 'white', fontSize: 12 }}>Debug: Reload Clients</Text>
+            </TouchableOpacity>
+            
+            {/* Database Debug button */}
+            <TouchableOpacity
+              style={{ 
+                backgroundColor: colors.error, 
+                padding: 8, 
+                borderRadius: 6, 
+                marginTop: 8,
+                alignItems: 'center'
+              }}
+              onPress={async () => {
+                console.log('=== DATABASE DEBUG ===');
+                
+                // Get current user
+                const { data: userData } = await supabase.auth.getUser();
+                console.log('Current user ID:', userData?.user?.id);
+                
+                // Check all assignments
+                const { data: allAssignments, error: assignError } = await supabase
+                  .from('client_assignments')
+                  .select('*');
+                console.log('All assignments:', allAssignments);
+                console.log('Assignments error:', assignError);
+                
+                // Check all clients
+                const { data: allClients, error: clientError } = await supabase
+                  .from('profiles')
+                  .select('id, full_name, email, role')
+                  .eq('role', 'client');
+                console.log('All clients:', allClients);
+                console.log('Clients error:', clientError);
+                
+                // Check assignments for current user
+                const { data: userAssignments, error: userAssignError } = await supabase
+                  .from('client_assignments')
+                  .select('*')
+                  .eq('trainer_id', userData?.user?.id);
+                console.log('User assignments:', userAssignments);
+                console.log('User assignments error:', userAssignError);
+                
+                Alert.alert('Debug Complete', 'Check console for database info');
+              }}
+            >
+              <Text style={{ color: 'white', fontSize: 12 }}>Debug: Check Database</Text>
             </TouchableOpacity>
           </View>
 
           <View style={styles.formRow}>
             <View style={styles.formFieldHalf}>
               <Text style={styles.fieldLabel}>Start Date</Text>
-              <TouchableOpacity
-                style={styles.picker}
-                onPress={() => setShowStartDatePicker(true)}
-              >
-                <Calendar size={16} color={colors.textSecondary} />
-                <Text style={styles.pickerText}>
-                  {startDate.toLocaleDateString()}
-                </Text>
-              </TouchableOpacity>
+              <TextInput
+                style={styles.textInput}
+                value={startDate}
+                onChangeText={setStartDate}
+                placeholder="YYYY-MM-DD"
+                placeholderTextColor={colors.textTertiary}
+              />
             </View>
 
             <View style={styles.formFieldHalf}>
               <Text style={styles.fieldLabel}>End Date</Text>
-              <TouchableOpacity
-                style={styles.picker}
-                onPress={() => setShowEndDatePicker(true)}
-              >
-                <Calendar size={16} color={colors.textSecondary} />
-                <Text style={styles.pickerText}>
-                  {endDate.toLocaleDateString()}
-                </Text>
-              </TouchableOpacity>
+              <TextInput
+                style={styles.textInput}
+                value={endDate}
+                onChangeText={setEndDate}
+                placeholder="YYYY-MM-DD"
+                placeholderTextColor={colors.textTertiary}
+              />
             </View>
           </View>
         </View>
@@ -600,6 +1026,7 @@ export default function CreatePlanScreen() {
             {scheduleType === 'weekly' && 'Same workout pattern repeats every week'}
             {scheduleType === 'monthly' && 'Different workout patterns for each week of the month'}
             {scheduleType === 'custom' && 'Specific workouts on specific dates'}
+            {scheduleType === 'session' && 'Individual training sessions without specific dates'}
           </Text>
         </View>
 
@@ -619,29 +1046,11 @@ export default function CreatePlanScreen() {
           {scheduleType === 'weekly' && renderWeeklySchedule()}
           {scheduleType === 'monthly' && renderMonthlySchedule()}
           {scheduleType === 'custom' && renderCustomSchedule()}
+        {scheduleType === 'session' && renderSessionSchedule()}
         </View>
 
         <View style={{ height: 100 }} />
       </ScrollView>
-
-      {/* Date Pickers */}
-      {showStartDatePicker && (
-        <DateTimePicker
-          value={startDate}
-          mode="date"
-          display={Platform.OS === 'ios' ? 'spinner' : 'default'}
-          onChange={onStartDateChange}
-        />
-      )}
-
-      {showEndDatePicker && (
-        <DateTimePicker
-          value={endDate}
-          mode="date"
-          display={Platform.OS === 'ios' ? 'spinner' : 'default'}
-          onChange={onEndDateChange}
-        />
-      )}
 
       {/* Client Picker Modal */}
       <Modal
@@ -650,16 +1059,21 @@ export default function CreatePlanScreen() {
         presentationStyle="pageSheet"
         onRequestClose={() => setShowClientPicker(false)}
       >
-        <SafeAreaView style={styles.modalContainer}>
-          <View style={styles.modalHeader}>
-            <Text style={styles.modalTitle}>Select Client</Text>
-            <TouchableOpacity onPress={() => setShowClientPicker(false)}>
-              <X size={24} color={colors.text} />
-            </TouchableOpacity>
-          </View>
+        <View style={styles.modalContainer}>
+          <View style={styles.modalHandle} />
+          <Text style={styles.modalTitle}>Select Client</Text>
           
           <ScrollView style={styles.clientList}>
-            {clients.map((client) => (
+            {(() => { console.log('Clients in modal:', clients); return null; })()}
+            {clients.length === 0 ? (
+              <View style={{ padding: 20, alignItems: 'center' }}>
+                <Text style={{ color: colors.textSecondary, fontSize: 16 }}>No clients found</Text>
+                <Text style={{ color: colors.textTertiary, fontSize: 14, marginTop: 8 }}>
+                  Make sure you have assigned clients in the admin panel
+                </Text>
+              </View>
+            ) : (
+              clients.map((client) => (
               <TouchableOpacity
                 key={client.id}
                 style={[
@@ -671,8 +1085,9 @@ export default function CreatePlanScreen() {
                   setShowClientPicker(false);
                 }}
               >
+                <Text style={styles.clientAvatar}>{client.avatar}</Text>
                 <View style={styles.clientInfo}>
-                  <Text style={styles.clientName}>{client.full_name}</Text>
+                  <Text style={styles.clientName}>{client.name}</Text>
                   <Text style={styles.clientEmail}>{client.email}</Text>
                 </View>
                 {selectedClient?.id === client.id && (
@@ -681,9 +1096,10 @@ export default function CreatePlanScreen() {
                   </View>
                 )}
               </TouchableOpacity>
-            ))}
+            ))
+            )}
           </ScrollView>
-        </SafeAreaView>
+        </View>
       </Modal>
 
       {/* Schedule Type Picker Modal */}
@@ -693,16 +1109,12 @@ export default function CreatePlanScreen() {
         presentationStyle="pageSheet"
         onRequestClose={() => setShowScheduleTypePicker(false)}
       >
-        <SafeAreaView style={styles.modalContainer}>
-          <View style={styles.modalHeader}>
-            <Text style={styles.modalTitle}>Select Schedule Type</Text>
-            <TouchableOpacity onPress={() => setShowScheduleTypePicker(false)}>
-              <X size={24} color={colors.text} />
-            </TouchableOpacity>
-          </View>
+        <View style={styles.modalContainer}>
+          <View style={styles.modalHandle} />
+          <Text style={styles.modalTitle}>Select Schedule Type</Text>
           
           <View style={styles.scheduleTypeList}>
-            {(['weekly', 'monthly', 'custom'] as ScheduleType[]).map((type) => (
+            {(['weekly', 'monthly', 'custom', 'session'] as ScheduleType[]).map((type) => (
               <TouchableOpacity
                 key={type}
                 style={[
@@ -733,7 +1145,7 @@ export default function CreatePlanScreen() {
               </TouchableOpacity>
             ))}
           </View>
-        </SafeAreaView>
+        </View>
       </Modal>
 
       {/* Template Picker Modal */}
@@ -743,13 +1155,11 @@ export default function CreatePlanScreen() {
         presentationStyle="pageSheet"
         onRequestClose={() => setShowTemplatePicker(false)}
       >
-        <SafeAreaView style={styles.modalContainer}>
-          <View style={styles.modalHeader}>
-            <Text style={styles.modalTitle}>Select Template</Text>
-            <TouchableOpacity onPress={() => setShowTemplatePicker(false)}>
-              <X size={24} color={colors.text} />
-            </TouchableOpacity>
-          </View>
+        <View style={styles.modalContainer}>
+          <View style={styles.modalHandle} />
+          <Text style={styles.modalTitle}>
+            Select Template
+          </Text>
           
           <ScrollView style={styles.templateList}>
             {/* Rest Day Option */}
@@ -773,13 +1183,14 @@ export default function CreatePlanScreen() {
                 <View style={styles.templateInfo}>
                   <Text style={styles.templateOptionName}>{template.name}</Text>
                   <Text style={styles.templateOptionDescription}>
-                    {template.estimated_duration_minutes} min • {template.category}
+                    {template.exercises.length} exercises • {template.duration} min
                   </Text>
+                  <Text style={styles.templateOptionCategory}>{template.category}</Text>
                 </View>
               </TouchableOpacity>
             ))}
           </ScrollView>
-        </SafeAreaView>
+        </View>
       </Modal>
     </SafeAreaView>
   );
@@ -810,13 +1221,10 @@ const createStyles = (colors: any) => StyleSheet.create({
     textAlign: 'center',
   },
   saveButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
     backgroundColor: colors.primary,
     borderRadius: 20,
     paddingHorizontal: 16,
     paddingVertical: 8,
-    gap: 4,
   },
   saveButtonDisabled: {
     opacity: 0.6,
@@ -874,10 +1282,6 @@ const createStyles = (colors: any) => StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 12,
   },
-  textArea: {
-    minHeight: 80,
-    textAlignVertical: 'top',
-  },
   picker: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -888,13 +1292,11 @@ const createStyles = (colors: any) => StyleSheet.create({
     borderRadius: 8,
     paddingHorizontal: 12,
     paddingVertical: 12,
-    gap: 8,
   },
   pickerText: {
     fontFamily: 'Inter-Regular',
     fontSize: 16,
     color: colors.text,
-    flex: 1,
   },
   placeholderText: {
     color: colors.textTertiary,
@@ -1135,38 +1537,44 @@ const createStyles = (colors: any) => StyleSheet.create({
   // Modal Styles
   modalContainer: {
     flex: 1,
-    backgroundColor: colors.background,
-  },
-  modalHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
+    backgroundColor: colors.surface,
+    paddingTop: 20,
     paddingHorizontal: 20,
-    paddingVertical: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.border,
+  },
+  modalHandle: {
+    width: 40,
+    height: 4,
+    backgroundColor: colors.border,
+    borderRadius: 2,
+    alignSelf: 'center',
+    marginBottom: 20,
   },
   modalTitle: {
     fontFamily: 'Inter-Bold',
     fontSize: 20,
     color: colors.text,
+    textAlign: 'center',
+    marginBottom: 32,
   },
   clientList: {
     flex: 1,
-    paddingHorizontal: 20,
   },
   clientOption: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: colors.surface,
+    backgroundColor: colors.surfaceSecondary,
     borderRadius: 12,
     padding: 16,
-    marginVertical: 4,
+    marginBottom: 8,
   },
   selectedClientOption: {
     backgroundColor: `${colors.primary}20`,
     borderWidth: 1,
     borderColor: colors.primary,
+  },
+  clientAvatar: {
+    fontSize: 24,
+    marginRight: 16,
   },
   clientInfo: {
     flex: 1,
@@ -1197,16 +1605,15 @@ const createStyles = (colors: any) => StyleSheet.create({
   },
   scheduleTypeList: {
     flex: 1,
-    paddingHorizontal: 20,
   },
   scheduleTypeOption: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    backgroundColor: colors.surface,
+    backgroundColor: colors.surfaceSecondary,
     borderRadius: 12,
     padding: 20,
-    marginVertical: 6,
+    marginBottom: 12,
   },
   selectedScheduleTypeOption: {
     backgroundColor: `${colors.primary}20`,
@@ -1233,13 +1640,12 @@ const createStyles = (colors: any) => StyleSheet.create({
   },
   templateList: {
     flex: 1,
-    paddingHorizontal: 20,
   },
   templateOption: {
-    backgroundColor: colors.surface,
+    backgroundColor: colors.surfaceSecondary,
     borderRadius: 12,
     padding: 16,
-    marginVertical: 4,
+    marginBottom: 8,
   },
   templateInfo: {
     flex: 1,
@@ -1254,5 +1660,11 @@ const createStyles = (colors: any) => StyleSheet.create({
     fontFamily: 'Inter-Regular',
     fontSize: 14,
     color: colors.textSecondary,
+    marginBottom: 4,
+  },
+  templateOptionCategory: {
+    fontFamily: 'Inter-Medium',
+    fontSize: 12,
+    color: colors.primary,
   },
 });
