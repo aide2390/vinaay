@@ -31,10 +31,8 @@ import { useColorScheme, getColors } from '../../hooks/useColorScheme';
 import { router } from 'expo-router';
 import { useFocusEffect } from '@react-navigation/native';
 import { useTodayDataNew } from '../../hooks/useTodayDataNew';
-import { getWorkoutTemplates, initializeDefaultTemplates } from '../../lib/workoutTemplates';
-import { supabase } from '@/lib/supabase';
+import { getWorkoutTemplates } from '../../lib/database';
 import { getClientTrainingSessions } from '../../lib/trainingSessionQueries';
-import { TrainingSession } from '../../lib/database';
 
 const { width } = Dimensions.get('window');
 
@@ -110,7 +108,7 @@ export default function CoachingTrainerView() {
 
       console.log('Fetching training sessions for client:', clientId, 'from', startDate, 'to', endDate);
       
-      let trainingSessions = await getClientTrainingSessions(clientId, startDate, endDate);
+      const trainingSessions = await getClientTrainingSessions(clientId, startDate, endDate);
       
       console.log('Found training sessions:', trainingSessions.length);
 
